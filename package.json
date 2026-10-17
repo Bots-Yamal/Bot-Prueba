@@ -1,0 +1,15 @@
+{
+  "name": "bot-de-prueba",
+  "version": "1.0.0",
+  "description": "Bot de Prueba - Sistema profesional de tickets",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.22.1"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
