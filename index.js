@@ -29,7 +29,7 @@ const TOKEN = process.env.DISCORD_TOKEN;
 const DB_FILE = "./database.json";
 
 if (!TOKEN) {
-  console.error("❌ Falta la variable DISCORD_TOKEN.");
+  console.error("❌ DISCORD_TOKEN no está configurado.");
   process.exit(1);
 }
 
@@ -44,7 +44,7 @@ const client = new Client({
 });
 
 // ======================================================
-// BASE DE DATOS JSON
+// DATABASE
 // ======================================================
 
 function defaultDB() {
@@ -62,14 +62,15 @@ function loadDB() {
   }
 
   try {
-    const data = JSON.parse(fs.readFileSync(DB_FILE, "utf8"));
+    const data = JSON.parse(
+      fs.readFileSync(DB_FILE, "utf8")
+    );
 
     if (!data.guilds) data.guilds = {};
     if (!data.tickets) data.tickets = {};
 
     return data;
-  } catch (error) {
-    console.error("❌ Error leyendo database.json:", error);
+  } catch {
     return defaultDB();
   }
 }
@@ -78,9 +79,12 @@ let db = loadDB();
 
 function saveDB() {
   try {
-    fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2));
+    fs.writeFileSync(
+      DB_FILE,
+      JSON.stringify(db, null, 2)
+    );
   } catch (error) {
-    console.error("❌ Error guardando database.json:", error);
+    console.error("❌ Error guardando database:", error);
   }
 }
 
@@ -88,10 +92,17 @@ function getGuildConfig(guildId) {
   if (!db.guilds[guildId]) {
     db.guilds[guildId] = {
       staffRole: null,
+
+      // Categoría de Discord donde se crean los tickets
       ticketCategory: null,
+
       ratingLogs: null,
       transactionLogs: null,
+
       blacklist: {},
+
+      customCategories: {},
+
       stats: {
         created: 0,
         closed: 0,
@@ -106,6 +117,7 @@ function getGuildConfig(guildId) {
   const config = db.guilds[guildId];
 
   if (!config.blacklist) config.blacklist = {};
+  if (!config.customCategories) config.customCategories = {};
 
   if (!config.stats) {
     config.stats = {
@@ -116,39 +128,38 @@ function getGuildConfig(guildId) {
     };
   }
 
-  if (!config.stats.ratings) config.stats.ratings = [];
-  if (!config.stats.staff) config.stats.staff = {};
+  if (!config.stats.ratings) {
+    config.stats.ratings = [];
+  }
+
+  if (!config.stats.staff) {
+    config.stats.staff = {};
+  }
 
   return config;
 }
 
 // ======================================================
-// CATEGORÍAS
+// CATEGORÍAS PREDETERMINADAS
 // ======================================================
 
-const CATEGORY_INFO = {
+const DEFAULT_CATEGORIES = {
   soporte: {
-    emoji: "📩",
     name: "Soporte General",
+    emoji: "📩",
     question: "¿En qué podemos ayudarte?",
-    placeholder:
-      "Describe detalladamente tu problema, duda o solicitud...",
   },
 
   compras: {
-    emoji: "💳",
     name: "Compras / Transacciones",
+    emoji: "💳",
     question: "¿Qué ocurrió con tu compra o transacción?",
-    placeholder:
-      "Describe el problema e incluye toda la información necesaria...",
   },
 
   alianzas: {
-    emoji: "🤝",
     name: "Alianzas",
+    emoji: "🤝",
     question: "¿Cuál es tu propuesta?",
-    placeholder:
-      "Cuéntanos sobre tu servidor, proyecto o propuesta...",
   },
 };
 
@@ -156,7 +167,7 @@ const CATEGORY_INFO = {
 // UTILIDADES
 // ======================================================
 
-function isRealAdmin(interaction) {
+function isAdmin(interaction) {
   return interaction.member.permissions.has(
     PermissionFlagsBits.Administrator
   );
@@ -170,9 +181,9 @@ function hasStaffRole(member, guildId) {
   return member.roles.cache.has(config.staffRole);
 }
 
-function isTicketStaff(interaction) {
+function isStaff(interaction) {
   return (
-    isRealAdmin(interaction) ||
+    isAdmin(interaction) ||
     hasStaffRole(interaction.member, interaction.guild.id)
   );
 }
@@ -186,62 +197,70 @@ function cleanName(text) {
       .replace(/[^a-z0-9-]/g, "-")
       .replace(/-+/g, "-")
       .replace(/^-|-$/g, "")
-      .slice(0, 80) || "ticket"
+      .slice(0, 70) || "ticket"
   );
 }
 
-async function safeReply(interaction, options) {
-  try {
-    if (interaction.replied || interaction.deferred) {
-      return await interaction.followUp(options);
-    }
+function getCategory(guildId, categoryId) {
+  const config = getGuildConfig(guildId);
 
-    return await interaction.reply(options);
-  } catch (error) {
-    console.error("❌ Error respondiendo:", error);
+  if (DEFAULT_CATEGORIES[categoryId]) {
+    return DEFAULT_CATEGORIES[categoryId];
   }
+
+  if (config.customCategories[categoryId]) {
+    return config.customCategories[categoryId];
+  }
+
+  return {
+    name: "Ticket",
+    emoji: "🎫",
+    question: "¿En qué podemos ayudarte?",
+  };
 }
 
-function categoryInfo(category) {
-  return (
-    CATEGORY_INFO[category] || {
-      emoji: "🎫",
-      name: "Ticket",
-      question: "Solicitud",
-    }
-  );
+function getAllCategories(guildId) {
+  const config = getGuildConfig(guildId);
+
+  return {
+    ...DEFAULT_CATEGORIES,
+    ...config.customCategories,
+  };
 }
 
 function getTicket(channelId) {
   return db.tickets[channelId] || null;
 }
 
-function statusName(ticket) {
-  switch (ticket.status) {
-    case "waiting":
-      return "🟡 Esperando atención";
-
-    case "claimed":
-      return "🟢 En atención";
-
-    case "rating":
-      return "⭐ Esperando valoración";
-
-    case "reason":
-      return "🟠 Pendiente del motivo de cierre";
-
-    case "confirm":
-      return "🔴 Pendiente de cierre";
-
-    case "closing":
-      return "🔴 Finalizando";
-
-    default:
-      return "⚪ Desconocido";
+function getStatus(ticket) {
+  if (ticket.status === "waiting") {
+    return "🟡 Esperando atención";
   }
+
+  if (ticket.status === "claimed") {
+    return "🟢 En atención";
+  }
+
+  if (ticket.status === "rating") {
+    return "⭐ Esperando valoración";
+  }
+
+  if (ticket.status === "reason") {
+    return "📝 Motivo de cierre";
+  }
+
+  if (ticket.status === "confirm") {
+    return "🔒 Pendiente de cierre";
+  }
+
+  if (ticket.status === "closing") {
+    return "🔴 Cerrando";
+  }
+
+  return "⚪ Desconocido";
 }
 
-function ensureStaffStats(guildId, userId) {
+function staffStats(guildId, userId) {
   const config = getGuildConfig(guildId);
 
   if (!config.stats.staff[userId]) {
@@ -260,95 +279,114 @@ function ensureStaffStats(guildId, userId) {
 // ======================================================
 
 async function createTranscript(channel, ticket) {
+  const messages = [];
+  let lastId;
+
   try {
-    let messagesArray = [];
-    let before;
+    while (messages.length < 1000) {
+      const options = {
+        limit: 100,
+      };
 
-    while (messagesArray.length < 1000) {
-      const options = { limit: 100 };
-
-      if (before) options.before = before;
-
-      const messages = await channel.messages.fetch(options);
-
-      if (!messages.size) break;
-
-      messagesArray.push(...messages.values());
-
-      before = messages.last().id;
-
-      if (messages.size < 100) break;
-    }
-
-    messagesArray.sort(
-      (a, b) => a.createdTimestamp - b.createdTimestamp
-    );
-
-    const info = categoryInfo(ticket.category);
-
-    const lines = [
-      "======================================================",
-      "                 TRANSCRIPCIÓN DEL TICKET",
-      "======================================================",
-      "",
-      `Servidor: ${channel.guild.name}`,
-      `Canal: #${channel.name}`,
-      `Usuario: ${ticket.ownerId}`,
-      `Categoría: ${info.name}`,
-      `Solicitud inicial: ${ticket.reason}`,
-      `Staff: ${ticket.claimedBy || "Sin asignar"}`,
-      `Estado: ${statusName(ticket)}`,
-      `Creado: ${new Date(ticket.createdAt).toLocaleString()}`,
-      `Motivo de cierre: ${ticket.closeReason || "Sin especificar"}`,
-      `Valoración: ${
-        ticket.rating ? `${ticket.rating}/5` : "Sin valoración"
-      }`,
-      `Comentario: ${ticket.ratingComment || "Sin comentario"}`,
-      "",
-      "======================================================",
-      "                       MENSAJES",
-      "======================================================",
-      "",
-    ];
-
-    for (const message of messagesArray) {
-      const date = new Date(
-        message.createdTimestamp
-      ).toLocaleString();
-
-      const content =
-        message.content && message.content.trim()
-          ? message.content
-          : "[Sin contenido de texto]";
-
-      lines.push(
-        `[${date}] ${message.author.tag} (${message.author.id})`
-      );
-
-      lines.push(content);
-
-      for (const attachment of message.attachments.values()) {
-        lines.push(`📎 ${attachment.name}: ${attachment.url}`);
+      if (lastId) {
+        options.before = lastId;
       }
 
-      if (message.embeds.length) {
-        lines.push(
-          `[El mensaje contiene ${message.embeds.length} embed(s)]`
-        );
-      }
+      const batch =
+        await channel.messages.fetch(options);
 
-      lines.push("");
+      if (!batch.size) break;
+
+      messages.push(...batch.values());
+
+      lastId = batch.last().id;
+
+      if (batch.size < 100) break;
     }
-
-    return Buffer.from(lines.join("\n"), "utf8");
   } catch (error) {
-    console.error("❌ Error generando transcript:", error);
-
-    return Buffer.from(
-      "No fue posible generar correctamente la transcripción.",
-      "utf8"
-    );
+    console.error("❌ Error obteniendo mensajes:", error);
   }
+
+  messages.sort(
+    (a, b) => a.createdTimestamp - b.createdTimestamp
+  );
+
+  const category = getCategory(
+    ticket.guildId,
+    ticket.category
+  );
+
+  const lines = [];
+
+  lines.push(
+    "===================================================="
+  );
+  lines.push("              TRANSCRIPT DEL TICKET");
+  lines.push(
+    "===================================================="
+  );
+  lines.push("");
+
+  lines.push(`Servidor: ${channel.guild.name}`);
+  lines.push(`Canal: #${channel.name}`);
+  lines.push(`Usuario: ${ticket.ownerId}`);
+  lines.push(`Categoría: ${category.name}`);
+  lines.push(`Pregunta: ${category.question}`);
+  lines.push(`Respuesta: ${ticket.reason}`);
+  lines.push(
+    `Staff: ${ticket.claimedBy || "Sin asignar"}`
+  );
+  lines.push(
+    `Valoración: ${
+      ticket.rating
+        ? `${ticket.rating}/5`
+        : "Sin valoración"
+    }`
+  );
+  lines.push(
+    `Comentario: ${
+      ticket.ratingComment || "Sin comentario"
+    }`
+  );
+  lines.push(
+    `Motivo de cierre: ${
+      ticket.closeReason || "Sin especificar"
+    }`
+  );
+
+  lines.push("");
+  lines.push(
+    "===================================================="
+  );
+  lines.push("                     MENSAJES");
+  lines.push(
+    "===================================================="
+  );
+  lines.push("");
+
+  for (const message of messages) {
+    const date = new Date(
+      message.createdTimestamp
+    ).toLocaleString();
+
+    lines.push(
+      `[${date}] ${message.author.tag}`
+    );
+
+    if (message.content) {
+      lines.push(message.content);
+    }
+
+    for (const attachment of message.attachments.values()) {
+      lines.push(
+        `📎 ${attachment.name}: ${attachment.url}`
+      );
+    }
+
+    lines.push("");
+  }
+
+  return Buffer.from(lines.join("\n"), "utf8");
 }
 
 // ======================================================
@@ -356,63 +394,133 @@ async function createTranscript(channel, ticket) {
 // ======================================================
 
 const commands = [
-  // /ticket
+  // ================================================
+  // TICKET
+  // ================================================
+
   new SlashCommandBuilder()
     .setName("ticket")
-    .setDescription("Sistema profesional de tickets")
+    .setDescription("Sistema de tickets")
+
     .addSubcommand(sub =>
       sub
         .setName("panel")
         .setDescription("Publica el panel de tickets")
     )
+
     .addSubcommand(sub =>
       sub
         .setName("info")
-        .setDescription("Muestra información del ticket actual")
+        .setDescription(
+          "Muestra información del ticket actual"
+        )
     ),
 
-  // /logs
-  new SlashCommandBuilder()
-    .setName("logs")
-    .setDescription("Configura los registros del sistema")
-    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+  // ================================================
+  // ADD CATEGORY
+  // ================================================
 
-    .addSubcommand(sub =>
-      sub
-        .setName("valoracion")
-        .setDescription("Configura el canal de valoraciones")
-        .addChannelOption(option =>
-          option
-            .setName("canal")
-            .setDescription("Canal de valoraciones")
-            .addChannelTypes(ChannelType.GuildText)
-            .setRequired(true)
+  new SlashCommandBuilder()
+    .setName("addcategory")
+    .setDescription(
+      "Crea una categoría personalizada de tickets"
+    )
+    .setDefaultMemberPermissions(
+      PermissionFlagsBits.Administrator
+    )
+
+    .addStringOption(option =>
+      option
+        .setName("nombre")
+        .setDescription(
+          "Nombre que aparecerá en el panel"
         )
+        .setRequired(true)
+        .setMaxLength(80)
+    )
+
+    .addStringOption(option =>
+      option
+        .setName("pregunta")
+        .setDescription(
+          "Pregunta que aparecerá al crear el ticket"
+        )
+        .setRequired(true)
+        .setMaxLength(200)
+    ),
+
+  // ================================================
+  // REMOVE CATEGORY
+  // ================================================
+
+  new SlashCommandBuilder()
+    .setName("removecategory")
+    .setDescription(
+      "Elimina una categoría personalizada"
+    )
+    .setDefaultMemberPermissions(
+      PermissionFlagsBits.Administrator
+    )
+
+    .addStringOption(option =>
+      option
+        .setName("categoria")
+        .setDescription(
+          "Nombre de la categoría que quieres eliminar"
+        )
+        .setRequired(true)
+        .setAutocomplete(true)
+    ),
+
+  // ================================================
+  // CATEGORY TICKET
+  // ================================================
+
+  new SlashCommandBuilder()
+    .setName("category")
+    .setDescription(
+      "Configura dónde se crearán los tickets"
+    )
+    .setDefaultMemberPermissions(
+      PermissionFlagsBits.Administrator
     )
 
     .addSubcommand(sub =>
       sub
-        .setName("transacciones")
-        .setDescription("Configura el canal de cierres/transcripts")
+        .setName("ticket")
+        .setDescription(
+          "Establece la categoría de Discord para los tickets"
+        )
         .addChannelOption(option =>
           option
-            .setName("canal")
-            .setDescription("Canal de registros")
-            .addChannelTypes(ChannelType.GuildText)
+            .setName("categoria")
+            .setDescription(
+              "Categoría de Discord donde aparecerán los tickets"
+            )
+            .addChannelTypes(ChannelType.GuildCategory)
             .setRequired(true)
         )
     ),
 
-  // /admin
+  // ================================================
+  // ADMIN
+  // ================================================
+
   new SlashCommandBuilder()
     .setName("admin")
-    .setDescription("Administración del sistema de tickets")
-    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .setDescription(
+      "Configuración administrativa del sistema"
+    )
+    .setDefaultMemberPermissions(
+      PermissionFlagsBits.Administrator
+    )
 
     .addSubcommand(sub =>
       sub
         .setName("rol")
-        .setDescription("Configura el rol del equipo de soporte")
+        .setDescription(
+          "Configura el rol del equipo de soporte"
+        )
         .addRoleOption(option =>
           option
             .setName("rol")
@@ -424,38 +532,69 @@ const commands = [
     .addSubcommand(sub =>
       sub
         .setName("quitar")
-        .setDescription("Elimina el rol de soporte configurado")
+        .setDescription(
+          "Quita el rol de soporte"
+        )
     )
 
     .addSubcommand(sub =>
       sub
         .setName("ver")
-        .setDescription("Muestra la configuración administrativa")
+        .setDescription(
+          "Muestra la configuración"
+        )
     ),
 
-  // /config
+  // ================================================
+  // LOGS
+  // ================================================
+
   new SlashCommandBuilder()
-    .setName("config")
-    .setDescription("Configuración avanzada de tickets")
-    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .setName("logs")
+    .setDescription("Configura los logs")
+    .setDefaultMemberPermissions(
+      PermissionFlagsBits.Administrator
+    )
 
     .addSubcommand(sub =>
       sub
-        .setName("categoria")
-        .setDescription("Categoría donde se crearán los tickets")
+        .setName("valoracion")
+        .setDescription(
+          "Configura los logs de valoraciones"
+        )
         .addChannelOption(option =>
           option
-            .setName("categoria")
-            .setDescription("Categoría de Discord")
-            .addChannelTypes(ChannelType.GuildCategory)
+            .setName("canal")
+            .setDescription("Canal")
+            .addChannelTypes(ChannelType.GuildText)
+            .setRequired(true)
+        )
+    )
+
+    .addSubcommand(sub =>
+      sub
+        .setName("transacciones")
+        .setDescription(
+          "Configura los logs de cierres"
+        )
+        .addChannelOption(option =>
+          option
+            .setName("canal")
+            .setDescription("Canal")
+            .addChannelTypes(ChannelType.GuildText)
             .setRequired(true)
         )
     ),
 
-  // /rename
+  // ================================================
+  // RENAME
+  // ================================================
+
   new SlashCommandBuilder()
     .setName("rename")
-    .setDescription("Renombra el ticket actual")
+    .setDescription(
+      "Cambia el nombre del ticket"
+    )
     .addStringOption(option =>
       option
         .setName("nombre")
@@ -464,15 +603,22 @@ const commands = [
         .setMaxLength(80)
     ),
 
-  // /user
+  // ================================================
+  // USER
+  // ================================================
+
   new SlashCommandBuilder()
     .setName("user")
-    .setDescription("Administra usuarios del ticket")
+    .setDescription(
+      "Administra usuarios del ticket"
+    )
 
     .addSubcommand(sub =>
       sub
         .setName("invite")
-        .setDescription("Añade un usuario al ticket")
+        .setDescription(
+          "Añade un usuario al ticket"
+        )
         .addUserOption(option =>
           option
             .setName("usuario")
@@ -484,7 +630,9 @@ const commands = [
     .addSubcommand(sub =>
       sub
         .setName("remove")
-        .setDescription("Retira un usuario del ticket")
+        .setDescription(
+          "Retira un usuario del ticket"
+        )
         .addUserOption(option =>
           option
             .setName("usuario")
@@ -493,49 +641,63 @@ const commands = [
         )
     ),
 
-  // /transfer
+  // ================================================
+  // TRANSFER
+  // ================================================
+
   new SlashCommandBuilder()
     .setName("transfer")
-    .setDescription("Transfiere el ticket a otro miembro del staff")
+    .setDescription(
+      "Transfiere un ticket"
+    )
     .addUserOption(option =>
       option
         .setName("usuario")
-        .setDescription("Nuevo responsable")
+        .setDescription(
+          "Nuevo miembro del staff"
+        )
         .setRequired(true)
     ),
 
-  // /release
+  // ================================================
+  // RELEASE
+  // ================================================
+
   new SlashCommandBuilder()
     .setName("release")
-    .setDescription("Libera el ticket para que otro staff pueda reclamarlo"),
-
-  // /notice
-  new SlashCommandBuilder()
-    .setName("notice")
-    .setDescription("Publica un aviso del equipo en el ticket")
-    .addStringOption(option =>
-      option
-        .setName("mensaje")
-        .setDescription("Contenido del aviso")
-        .setRequired(true)
-        .setMaxLength(1500)
+    .setDescription(
+      "Libera un ticket"
     ),
 
-  // /stats
+  // ================================================
+  // STATS
+  // ================================================
+
   new SlashCommandBuilder()
     .setName("stats")
-    .setDescription("Muestra estadísticas del sistema de tickets"),
+    .setDescription(
+      "Muestra estadísticas del sistema"
+    ),
 
-  // /blacklist
+  // ================================================
+  // BLACKLIST
+  // ================================================
+
   new SlashCommandBuilder()
     .setName("blacklist")
-    .setDescription("Administra la lista negra")
-    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .setDescription(
+      "Administra usuarios restringidos"
+    )
+    .setDefaultMemberPermissions(
+      PermissionFlagsBits.Administrator
+    )
 
     .addSubcommand(sub =>
       sub
         .setName("add")
-        .setDescription("Añade un usuario a la blacklist")
+        .setDescription(
+          "Añade un usuario"
+        )
         .addUserOption(option =>
           option
             .setName("usuario")
@@ -554,7 +716,9 @@ const commands = [
     .addSubcommand(sub =>
       sub
         .setName("remove")
-        .setDescription("Retira un usuario de la blacklist")
+        .setDescription(
+          "Retira un usuario"
+        )
         .addUserOption(option =>
           option
             .setName("usuario")
@@ -569,406 +733,137 @@ const commands = [
 // ======================================================
 
 client.once("ready", async () => {
-  console.log(`✅ Conectado como ${client.user.tag}`);
+  console.log(
+    `✅ Conectado como ${client.user.tag}`
+  );
 
   client.user.setPresence({
     activities: [
       {
-        name: "🎫 Sistema profesional de soporte",
+        name: "🎫 Sistema profesional de tickets",
       },
     ],
     status: "online",
   });
 
   try {
-    const rest = new REST({ version: "10" }).setToken(TOKEN);
+    const rest = new REST({
+      version: "10",
+    }).setToken(TOKEN);
 
-    await rest.put(Routes.applicationCommands(client.user.id), {
-      body: commands,
-    });
+    await rest.put(
+      Routes.applicationCommands(client.user.id),
+      {
+        body: commands,
+      }
+    );
 
-    console.log("✅ Comandos slash registrados.");
+    console.log("✅ Comandos registrados.");
   } catch (error) {
-    console.error("❌ Error registrando comandos:", error);
+    console.error(
+      "❌ Error registrando comandos:",
+      error
+    );
   }
 });
 
 // ======================================================
-// INTERACCIONES
+// AUTOCOMPLETADO
 // ======================================================
 
-client.on("interactionCreate", async interaction => {
-  try {
-    // ==================================================
-    // /ticket panel + /ticket info
-    // ==================================================
+client.on(
+  "interactionCreate",
+  async interaction => {
+    if (!interaction.isAutocomplete()) return;
 
     if (
-      interaction.isChatInputCommand() &&
-      interaction.commandName === "ticket"
+      interaction.commandName ===
+      "removecategory"
     ) {
-      const sub = interaction.options.getSubcommand();
+      const config = getGuildConfig(
+        interaction.guild.id
+      );
 
-      // PANEL = SOLO ADMIN REAL
-      if (sub === "panel") {
-        if (!isRealAdmin(interaction)) {
+      const focused =
+        interaction.options
+          .getFocused()
+          .toLowerCase();
+
+      const choices = Object.entries(
+        config.customCategories
+      )
+        .map(([id, category]) => ({
+          name: category.name,
+          value: id,
+        }))
+        .filter(item =>
+          item.name
+            .toLowerCase()
+            .includes(focused)
+        )
+        .slice(0, 25);
+
+      return interaction.respond(choices);
+    }
+  }
+);
+
+// ======================================================
+// INTERACTIONS
+// ======================================================
+
+client.on(
+  "interactionCreate",
+  async interaction => {
+    try {
+      // ================================================
+      // /ADDCATEGORY
+      // ================================================
+
+      if (
+        interaction.isChatInputCommand() &&
+        interaction.commandName ===
+          "addcategory"
+      ) {
+        if (!isAdmin(interaction)) {
           return interaction.reply({
             content:
-              "❌ Solo un administrador del servidor puede publicar el panel.",
+              "❌ Solo los administradores reales pueden crear categorías.",
             ephemeral: true,
           });
         }
 
-        const embed = new EmbedBuilder()
-          .setColor(0x5865f2)
-          .setAuthor({
-            name: `${interaction.guild.name} • Soporte`,
-            iconURL: interaction.guild.iconURL() || undefined,
-          })
-          .setTitle("🎫 Centro de Soporte")
-          .setDescription(
-            [
-              "### ¿Cómo podemos ayudarte?",
-              "Bienvenido a nuestro centro de atención.",
-              "",
-              "Selecciona el departamento que mejor corresponda con tu solicitud. Después podrás explicarnos detalladamente lo ocurrido.",
-              "",
-              "━━━━━━━━━━━━━━━━━━━━",
-              "",
-              "📩 **Soporte General**",
-              "> Dudas, problemas, reportes y asistencia.",
-              "",
-              "💳 **Compras / Transacciones**",
-              "> Consultas relacionadas con compras, pagos o transacciones.",
-              "",
-              "🤝 **Alianzas**",
-              "> Propuestas de colaboración y alianzas.",
-              "",
-              "━━━━━━━━━━━━━━━━━━━━",
-              "",
-              "### 📌 Antes de continuar",
-              "• Describe claramente tu solicitud.",
-              "• Adjunta capturas o pruebas cuando sea necesario.",
-              "• No abras varios tickets por el mismo motivo.",
-              "• El uso indebido del sistema puede ser restringido.",
-              "",
-              "**Selecciona una categoría para comenzar.**",
-            ].join("\n")
-          )
-          .setThumbnail(interaction.guild.iconURL() || null)
-          .setFooter({
-            text: "Sistema de Soporte • Atención organizada y segura",
-          })
-          .setTimestamp();
-
-        const menu = new StringSelectMenuBuilder()
-          .setCustomId("ticket_menu")
-          .setPlaceholder("📨 Selecciona un departamento...")
-          .addOptions(
-            {
-              label: "Soporte General",
-              description: "Dudas, problemas y asistencia",
-              value: "soporte",
-              emoji: "📩",
-            },
-            {
-              label: "Compras / Transacciones",
-              description: "Compras, pagos y transacciones",
-              value: "compras",
-              emoji: "💳",
-            },
-            {
-              label: "Alianzas",
-              description: "Propuestas y colaboraciones",
-              value: "alianzas",
-              emoji: "🤝",
-            }
+        const name =
+          interaction.options.getString(
+            "nombre"
           );
 
-        await interaction.channel.send({
-          embeds: [embed],
-          components: [
-            new ActionRowBuilder().addComponents(menu),
-          ],
-        });
+        const question =
+          interaction.options.getString(
+            "pregunta"
+          );
 
-        return interaction.reply({
-          content: "✅ Panel de soporte publicado correctamente.",
-          ephemeral: true,
-        });
-      }
+        const config = getGuildConfig(
+          interaction.guild.id
+        );
 
-      // INFO = STAFF
-      if (sub === "info") {
-        if (!isTicketStaff(interaction)) {
+        const id = cleanName(name);
+
+        if (
+          DEFAULT_CATEGORIES[id] ||
+          config.customCategories[id]
+        ) {
           return interaction.reply({
             content:
-              "❌ Solo el equipo de soporte puede consultar esta información.",
+              "❌ Ya existe una categoría con ese nombre.",
             ephemeral: true,
           });
         }
 
-        const ticket = getTicket(interaction.channel.id);
-
-        if (!ticket) {
-          return interaction.reply({
-            content:
-              "❌ Este canal no está registrado como un ticket.",
-            ephemeral: true,
-          });
-        }
-
-        const info = categoryInfo(ticket.category);
-
-        const embed = new EmbedBuilder()
-          .setColor(0x5865f2)
-          .setTitle("📋 Información del Ticket")
-          .addFields(
-            {
-              name: "👤 Propietario",
-              value: `<@${ticket.ownerId}>`,
-              inline: true,
-            },
-            {
-              name: "🛡️ Responsable",
-              value: ticket.claimedBy
-                ? `<@${ticket.claimedBy}>`
-                : "Sin asignar",
-              inline: true,
-            },
-            {
-              name: "📂 Categoría",
-              value: `${info.emoji} ${info.name}`,
-              inline: true,
-            },
-            {
-              name: "📊 Estado",
-              value: statusName(ticket),
-              inline: true,
-            },
-            {
-              name: "📝 Solicitud inicial",
-              value: ticket.reason,
-            }
-          )
-          .setTimestamp();
-
-        return interaction.reply({
-          embeds: [embed],
-          ephemeral: true,
-        });
-      }
-    }
-
-    // ==================================================
-    // /ADMIN
-    // ==================================================
-
-    if (
-      interaction.isChatInputCommand() &&
-      interaction.commandName === "admin"
-    ) {
-      if (!isRealAdmin(interaction)) {
-        return interaction.reply({
-          content:
-            "❌ Este comando requiere el permiso **Administrador** de Discord.",
-          ephemeral: true,
-        });
-      }
-
-      const sub = interaction.options.getSubcommand();
-      const config = getGuildConfig(interaction.guild.id);
-
-      if (sub === "rol") {
-        const role = interaction.options.getRole("rol");
-
-        config.staffRole = role.id;
-        saveDB();
-
-        return interaction.reply({
-          embeds: [
-            new EmbedBuilder()
-              .setColor(0x57f287)
-              .setTitle("🛡️ Equipo de Soporte Configurado")
-              .setDescription(
-                [
-                  `${role} ahora es el **rol oficial de soporte**.`,
-                  "",
-                  "### Este rol podrá",
-                  "• Ver los tickets creados.",
-                  "• Reclamar tickets disponibles.",
-                  "• Renombrar tickets.",
-                  "• Añadir o retirar usuarios.",
-                  "• Transferir o liberar tickets.",
-                  "• Gestionar el proceso de cierre.",
-                  "",
-                  "### No podrá",
-                  "• Publicar el panel.",
-                  "• Configurar los logs.",
-                  "• Cambiar el rol administrativo.",
-                  "• Administrar la blacklist.",
-                  "",
-                  "Los usuarios con permiso **Administrador** mantienen acceso total.",
-                ].join("\n")
-              )
-              .setTimestamp(),
-          ],
-        });
-      }
-
-      if (sub === "quitar") {
-        config.staffRole = null;
-        saveDB();
-
-        return interaction.reply({
-          content:
-            "✅ El rol de soporte configurado ha sido eliminado.",
-          ephemeral: true,
-        });
-      }
-
-      if (sub === "ver") {
-        return interaction.reply({
-          embeds: [
-            new EmbedBuilder()
-              .setColor(0x5865f2)
-              .setTitle("⚙️ Configuración del Sistema")
-              .addFields(
-                {
-                  name: "🛡️ Rol de soporte",
-                  value: config.staffRole
-                    ? `<@&${config.staffRole}>`
-                    : "No configurado",
-                },
-                {
-                  name: "📁 Categoría",
-                  value: config.ticketCategory
-                    ? `<#${config.ticketCategory}>`
-                    : "No configurada",
-                },
-                {
-                  name: "⭐ Logs de valoraciones",
-                  value: config.ratingLogs
-                    ? `<#${config.ratingLogs}>`
-                    : "No configurados",
-                },
-                {
-                  name: "📜 Logs / Transcripts",
-                  value: config.transactionLogs
-                    ? `<#${config.transactionLogs}>`
-                    : "No configurados",
-                }
-              )
-              .setTimestamp(),
-          ],
-          ephemeral: true,
-        });
-      }
-    }
-
-    // ==================================================
-    // /CONFIG CATEGORIA
-    // ==================================================
-
-    if (
-      interaction.isChatInputCommand() &&
-      interaction.commandName === "config"
-    ) {
-      if (!isRealAdmin(interaction)) {
-        return interaction.reply({
-          content: "❌ Solo administradores.",
-          ephemeral: true,
-        });
-      }
-
-      const category =
-        interaction.options.getChannel("categoria");
-
-      const config = getGuildConfig(interaction.guild.id);
-
-      config.ticketCategory = category.id;
-      saveDB();
-
-      return interaction.reply({
-        content:
-          `✅ Los nuevos tickets se crearán dentro de **${category.name}**.`,
-        ephemeral: true,
-      });
-    }
-
-    // ==================================================
-    // /LOGS
-    // ==================================================
-
-    if (
-      interaction.isChatInputCommand() &&
-      interaction.commandName === "logs"
-    ) {
-      if (!isRealAdmin(interaction)) {
-        return interaction.reply({
-          content:
-            "❌ Solo los administradores pueden configurar los logs.",
-          ephemeral: true,
-        });
-      }
-
-      const sub = interaction.options.getSubcommand();
-      const channel = interaction.options.getChannel("canal");
-      const config = getGuildConfig(interaction.guild.id);
-
-      if (sub === "valoracion") {
-        config.ratingLogs = channel.id;
-      }
-
-      if (sub === "transacciones") {
-        config.transactionLogs = channel.id;
-      }
-
-      saveDB();
-
-      return interaction.reply({
-        embeds: [
-          new EmbedBuilder()
-            .setColor(0x57f287)
-            .setTitle("✅ Configuración actualizada")
-            .setDescription(
-              sub === "valoracion"
-                ? `Las nuevas valoraciones serán publicadas en ${channel}.`
-                : `Los cierres y transcripts serán enviados a ${channel}.`
-            )
-            .setTimestamp(),
-        ],
-        ephemeral: true,
-      });
-    }
-
-    // ==================================================
-    // BLACKLIST
-    // ==================================================
-
-    if (
-      interaction.isChatInputCommand() &&
-      interaction.commandName === "blacklist"
-    ) {
-      if (!isRealAdmin(interaction)) {
-        return interaction.reply({
-          content: "❌ Solo administradores.",
-          ephemeral: true,
-        });
-      }
-
-      const config = getGuildConfig(interaction.guild.id);
-      const sub = interaction.options.getSubcommand();
-      const user = interaction.options.getUser("usuario");
-
-      if (sub === "add") {
-        const reason =
-          interaction.options.getString("motivo");
-
-        config.blacklist[user.id] = {
-          reason,
-          addedBy: interaction.user.id,
-          addedAt: Date.now(),
+        config.customCategories[id] = {
+          name,
+          emoji: "🎫",
+          question,
         };
 
         saveDB();
@@ -976,449 +871,117 @@ client.on("interactionCreate", async interaction => {
         return interaction.reply({
           embeds: [
             new EmbedBuilder()
-              .setColor(0xed4245)
-              .setTitle("🚫 Usuario restringido")
-              .setDescription(
-                `${user} ya no podrá crear tickets en este servidor.`
+              .setColor(0x57f287)
+              .setTitle(
+                "✅ Categoría creada"
               )
-              .addFields({
-                name: "Motivo",
-                value: reason,
-              })
+              .setDescription(
+                [
+                  `La categoría **${name}** ya está disponible en el panel.`,
+                  "",
+                  "### 🎫 Nombre",
+                  name,
+                  "",
+                  "### ❓ Pregunta",
+                  question,
+                  "",
+                  "Ahora solo necesitas volver a publicar el panel con:",
+                  "`/ticket panel`",
+                ].join("\n")
+              )
               .setTimestamp(),
           ],
           ephemeral: true,
         });
       }
 
-      if (sub === "remove") {
-        delete config.blacklist[user.id];
-        saveDB();
+      // ================================================
+      // /REMOVECATEGORY
+      // ================================================
 
-        return interaction.reply({
-          content:
-            `✅ ${user} ha sido retirado de la lista negra.`,
-          ephemeral: true,
-        });
-      }
-    }
-
-    // ==================================================
-    // MENÚ → FORMULARIO
-    // ==================================================
-
-    if (
-      interaction.isStringSelectMenu() &&
-      interaction.customId === "ticket_menu"
-    ) {
-      const config = getGuildConfig(interaction.guild.id);
-
-      const blacklisted =
-        config.blacklist[interaction.user.id];
-
-      if (blacklisted) {
-        return interaction.reply({
-          embeds: [
-            new EmbedBuilder()
-              .setColor(0xed4245)
-              .setTitle("🚫 Acceso al soporte restringido")
-              .setDescription(
-                "Actualmente no puedes crear tickets en este servidor."
-              )
-              .addFields({
-                name: "Motivo",
-                value: blacklisted.reason,
-              }),
-          ],
-          ephemeral: true,
-        });
-      }
-
-      const existing = Object.values(db.tickets).find(
-        t =>
-          t.guildId === interaction.guild.id &&
-          t.ownerId === interaction.user.id
-      );
-
-      if (existing) {
-        const existingChannel =
-          interaction.guild.channels.cache.get(
-            existing.channelId
-          );
-
-        if (existingChannel) {
+      if (
+        interaction.isChatInputCommand() &&
+        interaction.commandName ===
+          "removecategory"
+      ) {
+        if (!isAdmin(interaction)) {
           return interaction.reply({
             content:
-              `❌ Ya tienes una solicitud activa: ${existingChannel}`,
+              "❌ Solo los administradores reales pueden eliminar categorías.",
             ephemeral: true,
           });
         }
 
-        delete db.tickets[existing.channelId];
+        const id =
+          interaction.options.getString(
+            "categoria"
+          );
+
+        const config = getGuildConfig(
+          interaction.guild.id
+        );
+
+        if (
+          !config.customCategories[id]
+        ) {
+          return interaction.reply({
+            content:
+              "❌ Esa categoría personalizada no existe.",
+            ephemeral: true,
+          });
+        }
+
+        const name =
+          config.customCategories[id].name;
+
+        delete config.customCategories[id];
+
         saveDB();
-      }
 
-      const category = interaction.values[0];
-      const info = categoryInfo(category);
-
-      const modal = new ModalBuilder()
-        .setCustomId(`create_ticket_${category}`)
-        .setTitle(`${info.emoji} ${info.name}`);
-
-      const reason = new TextInputBuilder()
-        .setCustomId("reason")
-        .setLabel(info.question)
-        .setPlaceholder(info.placeholder)
-        .setStyle(TextInputStyle.Paragraph)
-        .setRequired(true)
-        .setMinLength(5)
-        .setMaxLength(1000);
-
-      modal.addComponents(
-        new ActionRowBuilder().addComponents(reason)
-      );
-
-      return interaction.showModal(modal);
-    }
-
-    // ==================================================
-    // CREAR TICKET
-    // ==================================================
-
-    if (
-      interaction.isModalSubmit() &&
-      interaction.customId.startsWith("create_ticket_")
-    ) {
-      const category =
-        interaction.customId.replace("create_ticket_", "");
-
-      const info = categoryInfo(category);
-      const reason =
-        interaction.fields.getTextInputValue("reason");
-
-      const config = getGuildConfig(interaction.guild.id);
-
-      await interaction.deferReply({
-        ephemeral: true,
-      });
-
-      const username = cleanName(interaction.user.username);
-
-      let channelName = `ticket-${username}`;
-
-      if (
-        interaction.guild.channels.cache.some(
-          c => c.name === channelName
-        )
-      ) {
-        channelName =
-          `ticket-${username}-${Date.now()
-            .toString()
-            .slice(-4)}`;
-      }
-
-      const overwrites = [
-        {
-          id: interaction.guild.id,
-          deny: [PermissionFlagsBits.ViewChannel],
-        },
-
-        {
-          id: interaction.user.id,
-          allow: [
-            PermissionFlagsBits.ViewChannel,
-            PermissionFlagsBits.SendMessages,
-            PermissionFlagsBits.ReadMessageHistory,
-            PermissionFlagsBits.AttachFiles,
-            PermissionFlagsBits.EmbedLinks,
-          ],
-        },
-      ];
-
-      if (config.staffRole) {
-        overwrites.push({
-          id: config.staffRole,
-          allow: [
-            PermissionFlagsBits.ViewChannel,
-            PermissionFlagsBits.SendMessages,
-            PermissionFlagsBits.ReadMessageHistory,
-            PermissionFlagsBits.AttachFiles,
-            PermissionFlagsBits.EmbedLinks,
-          ],
-        });
-      }
-
-      const channel =
-        await interaction.guild.channels.create({
-          name: channelName,
-          type: ChannelType.GuildText,
-          parent: config.ticketCategory || undefined,
-          permissionOverwrites: overwrites,
-        });
-
-      db.tickets[channel.id] = {
-        channelId: channel.id,
-        guildId: interaction.guild.id,
-        ownerId: interaction.user.id,
-        category,
-        reason,
-        claimedBy: null,
-        status: "waiting",
-        createdAt: Date.now(),
-
-        rating: null,
-        ratingComment: null,
-
-        closeReason: null,
-
-        invitedUsers: [],
-      };
-
-      config.stats.created++;
-      saveDB();
-
-      const embed = new EmbedBuilder()
-        .setColor(0x5865f2)
-        .setAuthor({
-          name: "Nueva solicitud de soporte",
-          iconURL: interaction.user.displayAvatarURL(),
-        })
-        .setTitle(`${info.emoji} ${info.name}`)
-        .setDescription(
-          [
-            `Bienvenido ${interaction.user}.`,
-            "",
-            "Tu solicitud ha sido registrada correctamente y ya es visible para nuestro equipo.",
-            "",
-            "━━━━━━━━━━━━━━━━━━━━",
-            "",
-            `### ${info.emoji} Categoría`,
-            `**${info.name}**`,
-            "",
-            `### 📝 ${info.question}`,
-            reason,
-            "",
-            "━━━━━━━━━━━━━━━━━━━━",
-            "",
-            "### 🟡 Estado",
-            "**Esperando a un miembro del equipo**",
-            "",
-            "Mientras esperas puedes proporcionar información adicional, capturas o archivos relacionados.",
-          ].join("\n")
-        )
-        .addFields({
-          name: "👤 Solicitante",
-          value:
-            `${interaction.user}\n\`${interaction.user.id}\``,
-          inline: true,
-        })
-        .setThumbnail(interaction.user.displayAvatarURL())
-        .setFooter({
-          text: `${interaction.guild.name} • Centro de Soporte`,
-          iconURL: interaction.guild.iconURL() || undefined,
-        })
-        .setTimestamp();
-
-      const buttons = new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setCustomId("claim_ticket")
-          .setLabel("Reclamar")
-          .setEmoji("🙋")
-          .setStyle(ButtonStyle.Primary),
-
-        new ButtonBuilder()
-          .setCustomId("close_ticket")
-          .setLabel("Cerrar ticket")
-          .setEmoji("🔒")
-          .setStyle(ButtonStyle.Danger)
-      );
-
-      await channel.send({
-        content: `${interaction.user}`,
-        embeds: [embed],
-        components: [buttons],
-      });
-
-      return interaction.editReply({
-        content:
-          `✅ Tu solicitud ha sido creada correctamente: ${channel}`,
-      });
-    }
-
-    // ==================================================
-    // RECLAMAR
-    // ==================================================
-
-    if (
-      interaction.isButton() &&
-      interaction.customId === "claim_ticket"
-    ) {
-      const ticket = getTicket(interaction.channel.id);
-
-      if (!ticket) {
-        return interaction.reply({
-          content: "❌ Este ticket ya no está registrado.",
-          ephemeral: true,
-        });
-      }
-
-      if (!isTicketStaff(interaction)) {
-        return interaction.reply({
-          content:
-            "❌ Esta acción está reservada para el equipo de soporte.",
-          ephemeral: true,
-        });
-      }
-
-      if (ticket.claimedBy) {
         return interaction.reply({
           embeds: [
             new EmbedBuilder()
-              .setColor(0xfee75c)
-              .setTitle("⚠️ Ticket ya asignado")
+              .setColor(0xed4245)
+              .setTitle(
+                "🗑️ Categoría eliminada"
+              )
               .setDescription(
-                [
-                  "Esta solicitud ya está siendo atendida.",
-                  "",
-                  `🛡️ **Responsable:** <@${ticket.claimedBy}>`,
-                  "",
-                  "Si es necesario cambiar al responsable, utiliza el comando de transferencia.",
-                ].join("\n")
-              ),
+                `La categoría **${name}** ya no aparecerá en los nuevos paneles.`
+              )
+              .setTimestamp(),
           ],
           ephemeral: true,
         });
       }
 
-      ticket.claimedBy = interaction.user.id;
-      ticket.status = "claimed";
+      // ================================================
+      // /CATEGORY TICKET
+      // ================================================
 
-      const staffStats = ensureStaffStats(
-        interaction.guild.id,
-        interaction.user.id
-      );
+      if (
+        interaction.isChatInputCommand() &&
+        interaction.commandName ===
+          "category"
+      ) {
+        if (!isAdmin(interaction)) {
+          return interaction.reply({
+            content:
+              "❌ Solo los administradores reales pueden configurar esto.",
+            ephemeral: true,
+          });
+        }
 
-      staffStats.claimed++;
+        const discordCategory =
+          interaction.options.getChannel(
+            "categoria"
+          );
 
-      saveDB();
-
-      const embed = new EmbedBuilder()
-        .setColor(0x57f287)
-        .setAuthor({
-          name: "Equipo de Soporte",
-          iconURL: interaction.user.displayAvatarURL(),
-        })
-        .setTitle("🙋 Solicitud asignada")
-        .setDescription(
-          [
-            `${interaction.user} ha reclamado esta solicitud.`,
-            "",
-            "### 🟢 Estado",
-            "**En atención**",
-            "",
-            `👤 **Usuario:** <@${ticket.ownerId}>`,
-            `🛡️ **Responsable:** ${interaction.user}`,
-            "",
-            "A partir de este momento, el miembro indicado será responsable de gestionar y finalizar esta solicitud.",
-          ].join("\n")
-        )
-        .setFooter({
-          text: "Centro de Soporte • Ticket en atención",
-        })
-        .setTimestamp();
-
-      return interaction.reply({
-        embeds: [embed],
-      });
-    }
-
-    // ==================================================
-    // /RENAME
-    // ==================================================
-
-    if (
-      interaction.isChatInputCommand() &&
-      interaction.commandName === "rename"
-    ) {
-      if (!isTicketStaff(interaction)) {
-        return interaction.reply({
-          content: "❌ Solo el equipo de soporte.",
-          ephemeral: true,
-        });
-      }
-
-      const ticket = getTicket(interaction.channel.id);
-
-      if (!ticket) {
-        return interaction.reply({
-          content:
-            "❌ Este comando solo funciona dentro de tickets.",
-          ephemeral: true,
-        });
-      }
-
-      const name = cleanName(
-        interaction.options.getString("nombre")
-      );
-
-      await interaction.channel.setName(name);
-
-      return interaction.reply({
-        embeds: [
-          new EmbedBuilder()
-            .setColor(0x5865f2)
-            .setTitle("✏️ Ticket renombrado")
-            .setDescription(
-              `${interaction.user} cambió el nombre de este ticket a **#${name}**.`
-            )
-            .setTimestamp(),
-        ],
-      });
-    }
-
-    // ==================================================
-    // /USER
-    // ==================================================
-
-    if (
-      interaction.isChatInputCommand() &&
-      interaction.commandName === "user"
-    ) {
-      if (!isTicketStaff(interaction)) {
-        return interaction.reply({
-          content: "❌ Solo el equipo de soporte.",
-          ephemeral: true,
-        });
-      }
-
-      const ticket = getTicket(interaction.channel.id);
-
-      if (!ticket) {
-        return interaction.reply({
-          content:
-            "❌ Este comando solo funciona dentro de tickets.",
-          ephemeral: true,
-        });
-      }
-
-      const sub = interaction.options.getSubcommand();
-      const user = interaction.options.getUser("usuario");
-
-      if (sub === "invite") {
-        await interaction.channel.permissionOverwrites.edit(
-          user.id,
-          {
-            ViewChannel: true,
-            SendMessages: true,
-            ReadMessageHistory: true,
-            AttachFiles: true,
-            EmbedLinks: true,
-          }
+        const config = getGuildConfig(
+          interaction.guild.id
         );
 
-        if (!ticket.invitedUsers.includes(user.id)) {
-          ticket.invitedUsers.push(user.id);
-        }
+        config.ticketCategory =
+          discordCategory.id;
 
         saveDB();
 
@@ -1426,446 +989,2043 @@ client.on("interactionCreate", async interaction => {
           embeds: [
             new EmbedBuilder()
               .setColor(0x57f287)
-              .setTitle("👤 Usuario añadido")
+              .setTitle(
+                "📁 Categoría de tickets configurada"
+              )
               .setDescription(
-                `${user} ha sido invitado a esta solicitud por ${interaction.user}.`
+                [
+                  "Todos los nuevos tickets se crearán dentro de:",
+                  "",
+                  `📂 **${discordCategory.name}**`,
+                  "",
+                  "Comando utilizado:",
+                  "`/category ticket categoria`",
+                ].join("\n")
               )
               .setTimestamp(),
           ],
+          ephemeral: true,
         });
       }
 
-      if (sub === "remove") {
-        if (user.id === ticket.ownerId) {
+      // ================================================
+      // /TICKET PANEL
+      // ================================================
+
+      if (
+        interaction.isChatInputCommand() &&
+        interaction.commandName ===
+          "ticket"
+      ) {
+        const sub =
+          interaction.options.getSubcommand();
+
+        // PANEL
+        if (sub === "panel") {
+          if (!isAdmin(interaction)) {
+            return interaction.reply({
+              content:
+                "❌ Solo los administradores pueden publicar el panel.",
+              ephemeral: true,
+            });
+          }
+
+          const categories =
+            getAllCategories(
+              interaction.guild.id
+            );
+
+          const options = Object.entries(
+            categories
+          )
+            .slice(0, 25)
+            .map(([id, category]) => ({
+              label: category.name.slice(
+                0,
+                100
+              ),
+              description:
+                category.question.slice(
+                  0,
+                  100
+                ),
+              value: id,
+              emoji:
+                category.emoji || "🎫",
+            }));
+
+          const embed =
+            new EmbedBuilder()
+              .setColor(0x5865f2)
+              .setAuthor({
+                name: `${interaction.guild.name} • Soporte`,
+                iconURL:
+                  interaction.guild.iconURL() ||
+                  undefined,
+              })
+              .setTitle(
+                "🎫 Centro de Soporte"
+              )
+              .setDescription(
+                [
+                  "### ¿Necesitas ayuda?",
+                  "",
+                  "Bienvenido al centro oficial de soporte.",
+                  "",
+                  "Selecciona la categoría que corresponda con tu solicitud.",
+                  "Al seleccionarla, tendrás que responder una pregunta antes de crear tu ticket.",
+                  "",
+                  "━━━━━━━━━━━━━━━━━━━━",
+                  "",
+                  "📌 **Información importante**",
+                  "• Describe claramente tu solicitud.",
+                  "• Adjunta pruebas cuando sea necesario.",
+                  "• No abras tickets duplicados.",
+                  "• El equipo de soporte atenderá tu solicitud cuando esté disponible.",
+                  "",
+                  "━━━━━━━━━━━━━━━━━━━━",
+                  "",
+                  "**Selecciona una categoría para comenzar.**",
+                ].join("\n")
+              )
+              .setThumbnail(
+                interaction.guild.iconURL() ||
+                  null
+              )
+              .setFooter({
+                text:
+                  "Sistema de Soporte • Atención organizada",
+              })
+              .setTimestamp();
+
+          const menu =
+            new StringSelectMenuBuilder()
+              .setCustomId(
+                "ticket_category_menu"
+              )
+              .setPlaceholder(
+                "🎫 Selecciona una categoría..."
+              )
+              .addOptions(options);
+
+          await interaction.channel.send(
+            {
+              embeds: [embed],
+              components: [
+                new ActionRowBuilder().addComponents(
+                  menu
+                ),
+              ],
+            }
+          );
+
           return interaction.reply({
             content:
-              "❌ No puedes retirar al propietario original.",
+              "✅ Panel publicado correctamente.",
             ephemeral: true,
           });
         }
 
-        await interaction.channel.permissionOverwrites.edit(
-          user.id,
-          {
-            ViewChannel: false,
-            SendMessages: false,
+        // INFO
+        if (sub === "info") {
+          if (!isStaff(interaction)) {
+            return interaction.reply({
+              content:
+                "❌ Solo el equipo de soporte puede utilizar esto.",
+              ephemeral: true,
+            });
           }
+
+          const ticket =
+            getTicket(
+              interaction.channel.id
+            );
+
+          if (!ticket) {
+            return interaction.reply({
+              content:
+                "❌ Este canal no es un ticket.",
+              ephemeral: true,
+            });
+          }
+
+          const category =
+            getCategory(
+              interaction.guild.id,
+              ticket.category
+            );
+
+          return interaction.reply({
+            embeds: [
+              new EmbedBuilder()
+                .setColor(0x5865f2)
+                .setTitle(
+                  "📋 Información del Ticket"
+                )
+                .addFields(
+                  {
+                    name: "👤 Usuario",
+                    value: `<@${ticket.ownerId}>`,
+                    inline: true,
+                  },
+                  {
+                    name: "🛡️ Responsable",
+                    value:
+                      ticket.claimedBy
+                        ? `<@${ticket.claimedBy}>`
+                        : "Sin asignar",
+                    inline: true,
+                  },
+                  {
+                    name: "📂 Categoría",
+                    value: `${category.emoji} ${category.name}`,
+                    inline: true,
+                  },
+                  {
+                    name: "📊 Estado",
+                    value:
+                      getStatus(ticket),
+                    inline: true,
+                  },
+                  {
+                    name: "❓ Pregunta",
+                    value:
+                      category.question,
+                  },
+                  {
+                    name: "📝 Respuesta",
+                    value:
+                      ticket.reason,
+                  }
+                )
+                .setTimestamp(),
+            ],
+            ephemeral: true,
+          });
+        }
+      }
+
+      // ================================================
+      // MENÚ DEL PANEL
+      // ================================================
+
+      if (
+        interaction.isStringSelectMenu() &&
+        interaction.customId ===
+          "ticket_category_menu"
+      ) {
+        const config =
+          getGuildConfig(
+            interaction.guild.id
+          );
+
+        if (
+          config.blacklist[
+            interaction.user.id
+          ]
+        ) {
+          return interaction.reply({
+            content:
+              "❌ No puedes crear tickets en este servidor.",
+            ephemeral: true,
+          });
+        }
+
+        const categoryId =
+          interaction.values[0];
+
+        const category =
+          getCategory(
+            interaction.guild.id,
+            categoryId
+          );
+
+        // Evitar múltiples tickets
+        const existing =
+          Object.values(db.tickets).find(
+            ticket =>
+              ticket.guildId ===
+                interaction.guild.id &&
+              ticket.ownerId ===
+                interaction.user.id
+          );
+
+        if (existing) {
+          const channel =
+            interaction.guild.channels.cache.get(
+              existing.channelId
+            );
+
+          if (channel) {
+            return interaction.reply({
+              content:
+                `❌ Ya tienes un ticket abierto: ${channel}`,
+              ephemeral: true,
+            });
+          }
+
+          delete db.tickets[
+            existing.channelId
+          ];
+
+          saveDB();
+        }
+
+        const modal =
+          new ModalBuilder()
+            .setCustomId(
+              `ticket_create_${categoryId}`
+            )
+            .setTitle(
+              category.name.slice(0, 45)
+            );
+
+        const question =
+          new TextInputBuilder()
+            .setCustomId("reason")
+            .setLabel(
+              category.question.slice(
+                0,
+                45
+              )
+            )
+            .setPlaceholder(
+              "Escribe aquí tu respuesta..."
+            )
+            .setStyle(
+              TextInputStyle.Paragraph
+            )
+            .setRequired(true)
+            .setMinLength(3)
+            .setMaxLength(1000);
+
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(
+            question
+          )
         );
 
-        ticket.invitedUsers =
-          ticket.invitedUsers.filter(id => id !== user.id);
+        return interaction.showModal(
+          modal
+        );
+      }
+
+      // ================================================
+      // CREAR TICKET
+      // ================================================
+
+      if (
+        interaction.isModalSubmit() &&
+        interaction.customId.startsWith(
+          "ticket_create_"
+        )
+      ) {
+        const categoryId =
+          interaction.customId.replace(
+            "ticket_create_",
+            ""
+          );
+
+        const category =
+          getCategory(
+            interaction.guild.id,
+            categoryId
+          );
+
+        const reason =
+          interaction.fields.getTextInputValue(
+            "reason"
+          );
+
+        const config =
+          getGuildConfig(
+            interaction.guild.id
+          );
+
+        await interaction.deferReply({
+          ephemeral: true,
+        });
+
+        const existing =
+          Object.values(db.tickets).find(
+            ticket =>
+              ticket.guildId ===
+                interaction.guild.id &&
+              ticket.ownerId ===
+                interaction.user.id
+          );
+
+        if (existing) {
+          const oldChannel =
+            interaction.guild.channels.cache.get(
+              existing.channelId
+            );
+
+          if (oldChannel) {
+            return interaction.editReply({
+              content:
+                `❌ Ya tienes un ticket abierto: ${oldChannel}`,
+            });
+          }
+
+          delete db.tickets[
+            existing.channelId
+          ];
+        }
+
+        const username =
+          cleanName(
+            interaction.user.username
+          );
+
+        let channelName =
+          `ticket-${username}`;
+
+        if (
+          interaction.guild.channels.cache.some(
+            channel =>
+              channel.name ===
+              channelName
+          )
+        ) {
+          channelName =
+            `ticket-${username}-${Date.now()
+              .toString()
+              .slice(-4)}`;
+        }
+
+        const overwrites = [
+          {
+            id: interaction.guild.id,
+            deny: [
+              PermissionFlagsBits.ViewChannel,
+            ],
+          },
+
+          {
+            id: interaction.user.id,
+            allow: [
+              PermissionFlagsBits.ViewChannel,
+              PermissionFlagsBits.SendMessages,
+              PermissionFlagsBits.ReadMessageHistory,
+              PermissionFlagsBits.AttachFiles,
+              PermissionFlagsBits.EmbedLinks,
+            ],
+          },
+        ];
+
+        if (config.staffRole) {
+          overwrites.push({
+            id: config.staffRole,
+            allow: [
+              PermissionFlagsBits.ViewChannel,
+              PermissionFlagsBits.SendMessages,
+              PermissionFlagsBits.ReadMessageHistory,
+              PermissionFlagsBits.AttachFiles,
+              PermissionFlagsBits.EmbedLinks,
+            ],
+          });
+        }
+
+        const channel =
+          await interaction.guild.channels.create(
+            {
+              name: channelName,
+              type: ChannelType.GuildText,
+
+              parent:
+                config.ticketCategory ||
+                undefined,
+
+              permissionOverwrites:
+                overwrites,
+            }
+          );
+
+        db.tickets[channel.id] = {
+          channelId: channel.id,
+          guildId:
+            interaction.guild.id,
+          ownerId:
+            interaction.user.id,
+
+          category: categoryId,
+
+          reason,
+
+          claimedBy: null,
+
+          status: "waiting",
+
+          createdAt: Date.now(),
+
+          rating: null,
+          ratingComment: null,
+
+          closeReason: null,
+
+          invitedUsers: [],
+        };
+
+        config.stats.created++;
+
+        saveDB();
+
+        // ============================================
+        // MENSAJE SIEMPRE IGUAL
+        // SOLO CAMBIAN CATEGORÍA/PREGUNTA
+        // ============================================
+
+        const embed =
+          new EmbedBuilder()
+            .setColor(0x5865f2)
+            .setAuthor({
+              name:
+                "Nueva solicitud de soporte",
+              iconURL:
+                interaction.user.displayAvatarURL(),
+            })
+            .setTitle(
+              "🎫 Solicitud creada"
+            )
+            .setDescription(
+              [
+                `Bienvenido ${interaction.user}.`,
+                "",
+                "Tu solicitud ha sido creada correctamente.",
+                "Un miembro de nuestro equipo la revisará lo antes posible.",
+                "",
+                "━━━━━━━━━━━━━━━━━━━━",
+                "",
+                `📂 **Categoría**`,
+                `${category.emoji} ${category.name}`,
+                "",
+                `❓ **${category.question}**`,
+                reason,
+                "",
+                "━━━━━━━━━━━━━━━━━━━━",
+                "",
+                "🟡 **Estado**",
+                "Esperando atención",
+                "",
+                "Puedes enviar información adicional, capturas o archivos relacionados con tu solicitud mientras esperas.",
+              ].join("\n")
+            )
+            .addFields({
+              name: "👤 Solicitante",
+              value:
+                `${interaction.user}\n\`${interaction.user.id}\``,
+              inline: true,
+            })
+            .setThumbnail(
+              interaction.user.displayAvatarURL()
+            )
+            .setFooter({
+              text:
+                "Sistema de Soporte • Atención organizada",
+              iconURL:
+                interaction.guild.iconURL() ||
+                undefined,
+            })
+            .setTimestamp();
+
+        const buttons =
+          new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+              .setCustomId(
+                "claim_ticket"
+              )
+              .setLabel(
+                "Reclamar ticket"
+              )
+              .setEmoji("🙋")
+              .setStyle(
+                ButtonStyle.Primary
+              ),
+
+            new ButtonBuilder()
+              .setCustomId(
+                "close_ticket"
+              )
+              .setLabel(
+                "Cerrar ticket"
+              )
+              .setEmoji("🔒")
+              .setStyle(
+                ButtonStyle.Danger
+              )
+          );
+
+        await channel.send({
+          content:
+            `${interaction.user}`,
+          embeds: [embed],
+          components: [buttons],
+        });
+
+        return interaction.editReply({
+          content:
+            `✅ Tu ticket ha sido creado correctamente: ${channel}`,
+        });
+      }
+
+      // ================================================
+      // RECLAMAR
+      // ================================================
+
+      if (
+        interaction.isButton() &&
+        interaction.customId ===
+          "claim_ticket"
+      ) {
+        const ticket =
+          getTicket(
+            interaction.channel.id
+          );
+
+        if (!ticket) {
+          return interaction.reply({
+            content:
+              "❌ Este ticket no existe.",
+            ephemeral: true,
+          });
+        }
+
+        if (!isStaff(interaction)) {
+          return interaction.reply({
+            content:
+              "❌ Solo el equipo de soporte puede reclamar tickets.",
+            ephemeral: true,
+          });
+        }
+
+        if (ticket.claimedBy) {
+          return interaction.reply({
+            embeds: [
+              new EmbedBuilder()
+                .setColor(
+                  0xfee75c
+                )
+                .setTitle(
+                  "⚠️ Ticket ya reclamado"
+                )
+                .setDescription(
+                  [
+                    "Este ticket ya está siendo atendido.",
+                    "",
+                    `🛡️ **Responsable:** <@${ticket.claimedBy}>`,
+                  ].join("\n")
+                ),
+            ],
+            ephemeral: true,
+          });
+        }
+
+        ticket.claimedBy =
+          interaction.user.id;
+
+        ticket.status =
+          "claimed";
+
+        const stats =
+          staffStats(
+            interaction.guild.id,
+            interaction.user.id
+          );
+
+        stats.claimed++;
 
         saveDB();
 
         return interaction.reply({
           embeds: [
             new EmbedBuilder()
-              .setColor(0xed4245)
-              .setTitle("👤 Usuario retirado")
+              .setColor(
+                0x57f287
+              )
+              .setAuthor({
+                name:
+                  "Equipo de Soporte",
+                iconURL:
+                  interaction.user.displayAvatarURL(),
+              })
+              .setTitle(
+                "🙋 Ticket reclamado"
+              )
               .setDescription(
-                `${user} ya no tiene acceso a este ticket.`
+                [
+                  `${interaction.user} ha tomado esta solicitud.`,
+                  "",
+                  "🟢 **Estado:** En atención",
+                  "",
+                  `👤 **Usuario:** <@${ticket.ownerId}>`,
+                  `🛡️ **Responsable:** ${interaction.user}`,
+                  "",
+                  "El responsable gestionará la solicitud hasta finalizarla.",
+                ].join("\n")
+              )
+              .setFooter({
+                text:
+                  "Sistema de Soporte • Ticket en atención",
+              })
+              .setTimestamp(),
+          ],
+        });
+      }
+
+      // ================================================
+      // RENAME
+      // ================================================
+
+      if (
+        interaction.isChatInputCommand() &&
+        interaction.commandName ===
+          "rename"
+      ) {
+        if (!isStaff(interaction)) {
+          return interaction.reply({
+            content:
+              "❌ Solo el equipo de soporte.",
+            ephemeral: true,
+          });
+        }
+
+        const ticket =
+          getTicket(
+            interaction.channel.id
+          );
+
+        if (!ticket) {
+          return interaction.reply({
+            content:
+              "❌ Este comando solo funciona dentro de tickets.",
+            ephemeral: true,
+          });
+        }
+
+        const name =
+          cleanName(
+            interaction.options.getString(
+              "nombre"
+            )
+          );
+
+        await interaction.channel.setName(
+          name
+        );
+
+        return interaction.reply({
+          embeds: [
+            new EmbedBuilder()
+              .setColor(
+                0x5865f2
+              )
+              .setTitle(
+                "✏️ Ticket renombrado"
+              )
+              .setDescription(
+                `${interaction.user} cambió el nombre del ticket a **#${name}**.`
               )
               .setTimestamp(),
           ],
         });
       }
-    }
 
-    // ==================================================
-    // /TRANSFER
-    // ==================================================
-
-    if (
-      interaction.isChatInputCommand() &&
-      interaction.commandName === "transfer"
-    ) {
-      if (!isTicketStaff(interaction)) {
-        return interaction.reply({
-          content: "❌ Solo el equipo de soporte.",
-          ephemeral: true,
-        });
-      }
-
-      const ticket = getTicket(interaction.channel.id);
-
-      if (!ticket) {
-        return interaction.reply({
-          content: "❌ No estás dentro de un ticket.",
-          ephemeral: true,
-        });
-      }
+      // ================================================
+      // USER
+      // ================================================
 
       if (
-        ticket.claimedBy !== interaction.user.id &&
-        !isRealAdmin(interaction)
+        interaction.isChatInputCommand() &&
+        interaction.commandName ===
+          "user"
       ) {
-        return interaction.reply({
-          content:
-            "❌ Solo el responsable actual o un administrador puede transferir este ticket.",
-          ephemeral: true,
-        });
+        if (!isStaff(interaction)) {
+          return interaction.reply({
+            content:
+              "❌ Solo el equipo de soporte.",
+            ephemeral: true,
+          });
+        }
+
+        const ticket =
+          getTicket(
+            interaction.channel.id
+          );
+
+        if (!ticket) {
+          return interaction.reply({
+            content:
+              "❌ Este comando solo funciona dentro de tickets.",
+            ephemeral: true,
+          });
+        }
+
+        const sub =
+          interaction.options.getSubcommand();
+
+        const user =
+          interaction.options.getUser(
+            "usuario"
+          );
+
+        if (sub === "invite") {
+          await interaction.channel.permissionOverwrites.edit(
+            user.id,
+            {
+              ViewChannel: true,
+              SendMessages: true,
+              ReadMessageHistory: true,
+              AttachFiles: true,
+              EmbedLinks: true,
+            }
+          );
+
+          if (
+            !ticket.invitedUsers.includes(
+              user.id
+            )
+          ) {
+            ticket.invitedUsers.push(
+              user.id
+            );
+          }
+
+          saveDB();
+
+          return interaction.reply({
+            embeds: [
+              new EmbedBuilder()
+                .setColor(
+                  0x57f287
+                )
+                .setTitle(
+                  "👤 Usuario añadido"
+                )
+                .setDescription(
+                  `${user} ahora puede acceder a este ticket.`
+                )
+                .setTimestamp(),
+            ],
+          });
+        }
+
+        if (sub === "remove") {
+          if (
+            user.id ===
+            ticket.ownerId
+          ) {
+            return interaction.reply({
+              content:
+                "❌ No puedes retirar al propietario del ticket.",
+              ephemeral: true,
+            });
+          }
+
+          await interaction.channel.permissionOverwrites.edit(
+            user.id,
+            {
+              ViewChannel: false,
+              SendMessages: false,
+            }
+          );
+
+          ticket.invitedUsers =
+            ticket.invitedUsers.filter(
+              id => id !== user.id
+            );
+
+          saveDB();
+
+          return interaction.reply({
+            embeds: [
+              new EmbedBuilder()
+                .setColor(
+                  0xed4245
+                )
+                .setTitle(
+                  "👤 Usuario retirado"
+                )
+                .setDescription(
+                  `${user} ya no tiene acceso a este ticket.`
+                )
+                .setTimestamp(),
+            ],
+          });
+        }
       }
 
-      const target = interaction.options.getUser("usuario");
-
-      const member =
-        await interaction.guild.members.fetch(target.id).catch(
-          () => null
-        );
+      // ================================================
+      // TRANSFER
+      // ================================================
 
       if (
-        !member ||
-        (!member.permissions.has(
-          PermissionFlagsBits.Administrator
-        ) &&
-          !hasStaffRole(member, interaction.guild.id))
+        interaction.isChatInputCommand() &&
+        interaction.commandName ===
+          "transfer"
       ) {
-        return interaction.reply({
-          content:
-            "❌ El usuario seleccionado no pertenece al equipo de soporte.",
-          ephemeral: true,
-        });
-      }
+        if (!isStaff(interaction)) {
+          return interaction.reply({
+            content:
+              "❌ Solo el equipo de soporte.",
+            ephemeral: true,
+          });
+        }
 
-      const oldStaff = ticket.claimedBy;
+        const ticket =
+          getTicket(
+            interaction.channel.id
+          );
 
-      ticket.claimedBy = target.id;
-      ticket.status = "claimed";
+        if (!ticket) {
+          return interaction.reply({
+            content:
+              "❌ No estás dentro de un ticket.",
+            ephemeral: true,
+          });
+        }
 
-      saveDB();
+        if (
+          ticket.claimedBy !==
+            interaction.user.id &&
+          !isAdmin(interaction)
+        ) {
+          return interaction.reply({
+            content:
+              "❌ Solo el responsable o un administrador puede transferirlo.",
+            ephemeral: true,
+          });
+        }
 
-      return interaction.reply({
-        embeds: [
-          new EmbedBuilder()
-            .setColor(0x5865f2)
-            .setTitle("🔄 Ticket transferido")
-            .setDescription(
-              [
-                "La responsabilidad de esta solicitud ha sido transferida.",
-                "",
-                `🛡️ **Anterior:** ${
-                  oldStaff ? `<@${oldStaff}>` : "Sin asignar"
-                }`,
-                `🛡️ **Nuevo responsable:** ${target}`,
-                `👤 **Transferido por:** ${interaction.user}`,
-              ].join("\n")
-            )
-            .setTimestamp(),
-        ],
-      });
-    }
+        const user =
+          interaction.options.getUser(
+            "usuario"
+          );
 
-    // ==================================================
-    // /RELEASE
-    // ==================================================
+        const member =
+          await interaction.guild.members
+            .fetch(user.id)
+            .catch(() => null);
 
-    if (
-      interaction.isChatInputCommand() &&
-      interaction.commandName === "release"
-    ) {
-      if (!isTicketStaff(interaction)) {
-        return interaction.reply({
-          content: "❌ Solo el equipo de soporte.",
-          ephemeral: true,
-        });
-      }
+        if (
+          !member ||
+          (!isAdmin({
+            member,
+          }) &&
+            !hasStaffRole(
+              member,
+              interaction.guild.id
+            ))
+        ) {
+          return interaction.reply({
+            content:
+              "❌ Ese usuario no pertenece al equipo de soporte.",
+            ephemeral: true,
+          });
+        }
 
-      const ticket = getTicket(interaction.channel.id);
+        ticket.claimedBy =
+          user.id;
 
-      if (!ticket) {
-        return interaction.reply({
-          content: "❌ No estás dentro de un ticket.",
-          ephemeral: true,
-        });
-      }
+        ticket.status =
+          "claimed";
 
-      if (
-        ticket.claimedBy !== interaction.user.id &&
-        !isRealAdmin(interaction)
-      ) {
-        return interaction.reply({
-          content:
-            "❌ Solo el responsable actual puede liberar este ticket.",
-          ephemeral: true,
-        });
-      }
+        saveDB();
 
-      ticket.claimedBy = null;
-      ticket.status = "waiting";
-
-      saveDB();
-
-      return interaction.reply({
-        embeds: [
-          new EmbedBuilder()
-            .setColor(0xfee75c)
-            .setTitle("🙋 Ticket liberado")
-            .setDescription(
-              [
-                `${interaction.user} ha liberado esta solicitud.`,
-                "",
-                "### 🟡 Estado",
-                "**Esperando atención**",
-                "",
-                "Otro miembro del equipo ya puede reclamarla.",
-              ].join("\n")
-            )
-            .setTimestamp(),
-        ],
-      });
-    }
-
-    // ==================================================
-    // /NOTICE
-    // ==================================================
-
-    if (
-      interaction.isChatInputCommand() &&
-      interaction.commandName === "notice"
-    ) {
-      if (!isTicketStaff(interaction)) {
-        return interaction.reply({
-          content: "❌ Solo el equipo de soporte.",
-          ephemeral: true,
-        });
-      }
-
-      const ticket = getTicket(interaction.channel.id);
-
-      if (!ticket) {
-        return interaction.reply({
-          content:
-            "❌ Este comando solo funciona dentro de tickets.",
-          ephemeral: true,
-        });
-      }
-
-      const message =
-        interaction.options.getString("mensaje");
-
-      return interaction.reply({
-        embeds: [
-          new EmbedBuilder()
-            .setColor(0xfee75c)
-            .setAuthor({
-              name: "Aviso del Equipo de Soporte",
-            })
-            .setTitle("📢 Información importante")
-            .setDescription(message)
-            .addFields({
-              name: "Publicado por",
-              value: `${interaction.user}`,
-              inline: true,
-            })
-            .setFooter({
-              text: "Centro de Soporte • Aviso oficial",
-            })
-            .setTimestamp(),
-        ],
-      });
-    }
-
-    // ==================================================
-    // /STATS
-    // ==================================================
-
-    if (
-      interaction.isChatInputCommand() &&
-      interaction.commandName === "stats"
-    ) {
-      if (!isTicketStaff(interaction)) {
-        return interaction.reply({
-          content:
-            "❌ Las estadísticas son exclusivas del equipo.",
-          ephemeral: true,
-        });
-      }
-
-      const config = getGuildConfig(interaction.guild.id);
-
-      const ratings = config.stats.ratings;
-
-      const average =
-        ratings.length > 0
-          ? (
-              ratings.reduce((a, b) => a + b, 0) /
-              ratings.length
-            ).toFixed(2)
-          : "Sin datos";
-
-      return interaction.reply({
-        embeds: [
-          new EmbedBuilder()
-            .setColor(0x5865f2)
-            .setTitle("📊 Estadísticas de Soporte")
-            .setDescription(
-              "Resumen general de la actividad del sistema de tickets."
-            )
-            .addFields(
-              {
-                name: "📨 Tickets creados",
-                value: `${config.stats.created}`,
-                inline: true,
-              },
-              {
-                name: "✅ Tickets cerrados",
-                value: `${config.stats.closed}`,
-                inline: true,
-              },
-              {
-                name: "⭐ Valoraciones",
-                value: `${ratings.length}`,
-                inline: true,
-              },
-              {
-                name: "📈 Promedio",
-                value:
-                  average === "Sin datos"
-                    ? average
-                    : `⭐ ${average}/5`,
-                inline: true,
-              }
-            )
-            .setTimestamp(),
-        ],
-        ephemeral: true,
-      });
-    }
-
-    // ==================================================
-    // BOTÓN CERRAR - FLUJO DE 3 PASOS
-    // ==================================================
-
-    if (
-      interaction.isButton() &&
-      interaction.customId === "close_ticket"
-    ) {
-      const ticket = getTicket(interaction.channel.id);
-
-      if (!ticket) {
-        return interaction.reply({
-          content: "❌ Este ticket ya no está registrado.",
-          ephemeral: true,
-        });
-      }
-
-      if (!isTicketStaff(interaction)) {
-        return interaction.reply({
-          content:
-            "❌ Solo el equipo de soporte puede gestionar el cierre.",
-          ephemeral: true,
-        });
-      }
-
-      if (!ticket.claimedBy) {
         return interaction.reply({
           embeds: [
             new EmbedBuilder()
-              .setColor(0xed4245)
-              .setTitle("⚠️ Ticket sin responsable")
+              .setColor(
+                0x5865f2
+              )
+              .setTitle(
+                "🔄 Ticket transferido"
+              )
               .setDescription(
-                "Antes de iniciar el proceso de cierre, un miembro del equipo debe reclamar esta solicitud."
-              ),
+                [
+                  `🛡️ **Nuevo responsable:** ${user}`,
+                  `👤 **Transferido por:** ${interaction.user}`,
+                  "",
+                  "La solicitud continuará bajo la responsabilidad del nuevo miembro.",
+                ].join("\n")
+              )
+              .setTimestamp(),
+          ],
+        });
+      }
+
+      // ================================================
+      // RELEASE
+      // ================================================
+
+      if (
+        interaction.isChatInputCommand() &&
+        interaction.commandName ===
+          "release"
+      ) {
+        if (!isStaff(interaction)) {
+          return interaction.reply({
+            content:
+              "❌ Solo el equipo de soporte.",
+            ephemeral: true,
+          });
+        }
+
+        const ticket =
+          getTicket(
+            interaction.channel.id
+          );
+
+        if (!ticket) {
+          return interaction.reply({
+            content:
+              "❌ Este canal no es un ticket.",
+            ephemeral: true,
+          });
+        }
+
+        if (
+          ticket.claimedBy !==
+            interaction.user.id &&
+          !isAdmin(interaction)
+        ) {
+          return interaction.reply({
+            content:
+              "❌ Solo el responsable puede liberar el ticket.",
+            ephemeral: true,
+          });
+        }
+
+        ticket.claimedBy =
+          null;
+
+        ticket.status =
+          "waiting";
+
+        saveDB();
+
+        return interaction.reply({
+          embeds: [
+            new EmbedBuilder()
+              .setColor(
+                0xfee75c
+              )
+              .setTitle(
+                "🙋 Ticket liberado"
+              )
+              .setDescription(
+                [
+                  `${interaction.user} ha liberado esta solicitud.`,
+                  "",
+                  "🟡 **Estado:** Esperando atención",
+                  "",
+                  "Otro miembro del equipo puede reclamarla.",
+                ].join("\n")
+              )
+              .setTimestamp(),
+          ],
+        });
+      }
+
+      // ================================================
+      // STATS
+      // ================================================
+
+      if (
+        interaction.isChatInputCommand() &&
+        interaction.commandName ===
+          "stats"
+      ) {
+        if (!isStaff(interaction)) {
+          return interaction.reply({
+            content:
+              "❌ Solo el equipo de soporte.",
+            ephemeral: true,
+          });
+        }
+
+        const config =
+          getGuildConfig(
+            interaction.guild.id
+          );
+
+        const ratings =
+          config.stats.ratings;
+
+        const average =
+          ratings.length
+            ? (
+                ratings.reduce(
+                  (a, b) =>
+                    a + b,
+                  0
+                ) /
+                ratings.length
+              ).toFixed(2)
+            : "Sin datos";
+
+        return interaction.reply({
+          embeds: [
+            new EmbedBuilder()
+              .setColor(
+                0x5865f2
+              )
+              .setTitle(
+                "📊 Estadísticas"
+              )
+              .addFields(
+                {
+                  name:
+                    "🎫 Creados",
+                  value:
+                    `${config.stats.created}`,
+                  inline: true,
+                },
+                {
+                  name:
+                    "🔒 Cerrados",
+                  value:
+                    `${config.stats.closed}`,
+                  inline: true,
+                },
+                {
+                  name:
+                    "⭐ Valoraciones",
+                  value:
+                    `${ratings.length}`,
+                  inline: true,
+                },
+                {
+                  name:
+                    "📈 Promedio",
+                  value:
+                    average ===
+                    "Sin datos"
+                      ? average
+                      : `⭐ ${average}/5`,
+                  inline: true,
+                }
+              )
+              .setTimestamp(),
           ],
           ephemeral: true,
         });
       }
 
+      // ================================================
+      // BLACKLIST
+      // ================================================
+
       if (
-        ticket.claimedBy !== interaction.user.id &&
-        !isRealAdmin(interaction)
+        interaction.isChatInputCommand() &&
+        interaction.commandName ===
+          "blacklist"
       ) {
+        if (!isAdmin(interaction)) {
+          return interaction.reply({
+            content:
+              "❌ Solo administradores.",
+            ephemeral: true,
+          });
+        }
+
+        const config =
+          getGuildConfig(
+            interaction.guild.id
+          );
+
+        const sub =
+          interaction.options.getSubcommand();
+
+        const user =
+          interaction.options.getUser(
+            "usuario"
+          );
+
+        if (sub === "add") {
+          const reason =
+            interaction.options.getString(
+              "motivo"
+            );
+
+          config.blacklist[
+            user.id
+          ] = {
+            reason,
+            addedBy:
+              interaction.user.id,
+            addedAt: Date.now(),
+          };
+
+          saveDB();
+
+          return interaction.reply({
+            content:
+              `🚫 ${user} ha sido restringido del sistema de tickets.`,
+            ephemeral: true,
+          });
+        }
+
+        if (sub === "remove") {
+          delete config.blacklist[
+            user.id
+          ];
+
+          saveDB();
+
+          return interaction.reply({
+            content:
+              `✅ ${user} ya puede crear tickets nuevamente.`,
+            ephemeral: true,
+          });
+        }
+      }
+
+      // ================================================
+      // ADMIN
+      // ================================================
+
+      if (
+        interaction.isChatInputCommand() &&
+        interaction.commandName ===
+          "admin"
+      ) {
+        if (!isAdmin(interaction)) {
+          return interaction.reply({
+            content:
+              "❌ Solo administradores reales.",
+            ephemeral: true,
+          });
+        }
+
+        const sub =
+          interaction.options.getSubcommand();
+
+        const config =
+          getGuildConfig(
+            interaction.guild.id
+          );
+
+        if (sub === "rol") {
+          const role =
+            interaction.options.getRole(
+              "rol"
+            );
+
+          config.staffRole =
+            role.id;
+
+          saveDB();
+
+          return interaction.reply({
+            embeds: [
+              new EmbedBuilder()
+                .setColor(
+                  0x57f287
+                )
+                .setTitle(
+                  "🛡️ Rol de soporte configurado"
+                )
+                .setDescription(
+                  [
+                    `${role} es ahora el equipo de soporte.`,
+                    "",
+                    "Podrán:",
+                    "• Ver tickets.",
+                    "• Reclamar tickets.",
+                    "• Renombrarlos.",
+                    "• Invitar y retirar usuarios.",
+                    "• Transferir tickets.",
+                    "• Liberarlos.",
+                    "• Gestionar cierres.",
+                    "",
+                    "No podrán:",
+                    "• Publicar paneles.",
+                    "• Crear/eliminar categorías.",
+                    "• Configurar logs.",
+                    "• Usar `/admin`.",
+                    "• Configurar dónde se crean los tickets.",
+                  ].join("\n")
+                )
+                .setTimestamp(),
+            ],
+          });
+        }
+
+        if (sub === "quitar") {
+          config.staffRole =
+            null;
+
+          saveDB();
+
+          return interaction.reply({
+            content:
+              "✅ Rol de soporte eliminado.",
+            ephemeral: true,
+          });
+        }
+
+        if (sub === "ver") {
+          return interaction.reply({
+            embeds: [
+              new EmbedBuilder()
+                .setColor(
+                  0x5865f2
+                )
+                .setTitle(
+                  "⚙️ Configuración"
+                )
+                .addFields(
+                  {
+                    name:
+                      "🛡️ Staff",
+                    value:
+                      config.staffRole
+                        ? `<@&${config.staffRole}>`
+                        : "No configurado",
+                  },
+                  {
+                    name:
+                      "📁 Categoría de tickets",
+                    value:
+                      config.ticketCategory
+                        ? `<#${config.ticketCategory}>`
+                        : "No configurada",
+                  },
+                  {
+                    name:
+                      "⭐ Logs valoración",
+                    value:
+                      config.ratingLogs
+                        ? `<#${config.ratingLogs}>`
+                        : "No configurados",
+                  },
+                  {
+                    name:
+                      "📜 Logs cierres",
+                    value:
+                      config.transactionLogs
+                        ? `<#${config.transactionLogs}>`
+                        : "No configurados",
+                  }
+                )
+                .setTimestamp(),
+            ],
+            ephemeral: true,
+          });
+        }
+      }
+
+      // ================================================
+      // LOGS
+      // ================================================
+
+      if (
+        interaction.isChatInputCommand() &&
+        interaction.commandName ===
+          "logs"
+      ) {
+        if (!isAdmin(interaction)) {
+          return interaction.reply({
+            content:
+              "❌ Solo administradores.",
+            ephemeral: true,
+          });
+        }
+
+        const config =
+          getGuildConfig(
+            interaction.guild.id
+          );
+
+        const sub =
+          interaction.options.getSubcommand();
+
+        const channel =
+          interaction.options.getChannel(
+            "canal"
+          );
+
+        if (
+          sub === "valoracion"
+        ) {
+          config.ratingLogs =
+            channel.id;
+        }
+
+        if (
+          sub ===
+          "transacciones"
+        ) {
+          config.transactionLogs =
+            channel.id;
+        }
+
+        saveDB();
+
         return interaction.reply({
           content:
-            `🔒 Este ticket está siendo atendido por <@${ticket.claimedBy}>. Solo esa persona puede iniciar su cierre.`,
+            `✅ Logs configurados en ${channel}.`,
           ephemeral: true,
         });
       }
 
       // ================================================
-      // PRIMER CLIC → VALORACIÓN
+      // CERRAR TICKET
       // ================================================
 
-      if (ticket.status === "claimed") {
-        ticket.status = "rating";
+      if (
+        interaction.isButton() &&
+        interaction.customId ===
+          "close_ticket"
+      ) {
+        const ticket =
+          getTicket(
+            interaction.channel.id
+          );
+
+        if (!ticket) {
+          return interaction.reply({
+            content:
+              "❌ Este ticket no está registrado.",
+            ephemeral: true,
+          });
+        }
+
+        if (!isStaff(interaction)) {
+          return interaction.reply({
+            content:
+              "❌ Solo el equipo de soporte puede cerrar tickets.",
+            ephemeral: true,
+          });
+        }
+
+        if (!ticket.claimedBy) {
+          return interaction.reply({
+            content:
+              "❌ Primero debes reclamar el ticket.",
+            ephemeral: true,
+          });
+        }
+
+        if (
+          ticket.claimedBy !==
+            interaction.user.id &&
+          !isAdmin(interaction)
+        ) {
+          return interaction.reply({
+            content:
+              `❌ Este ticket está siendo atendido por <@${ticket.claimedBy}>.`,
+            ephemeral: true,
+          });
+        }
+
+        // --------------------------------------------
+        // VALORAR
+        // --------------------------------------------
+
+        if (
+          ticket.status ===
+          "claimed"
+        ) {
+          ticket.status =
+            "rating";
+
+          saveDB();
+
+          const ratingEmbed =
+            new EmbedBuilder()
+              .setColor(
+                0xfee75c
+              )
+              .setTitle(
+                "⭐ Valorar atención"
+              )
+              .setDescription(
+                [
+                  `<@${ticket.ownerId}>, antes de finalizar tu solicitud queremos conocer tu experiencia.`,
+                  "",
+                  `🛡️ **Atendido por:** <@${ticket.claimedBy}>`,
+                  "",
+                  "Selecciona la cantidad de estrellas que deseas otorgar.",
+                  "",
+                  "⭐ **1** — Muy mala",
+                  "⭐⭐ **2** — Mala",
+                  "⭐⭐⭐ **3** — Regular",
+                  "⭐⭐⭐⭐ **4** — Buena",
+                  "⭐⭐⭐⭐⭐ **5** — Excelente",
+                  "",
+                  "Tu valoración quedará registrada en el sistema.",
+                ].join("\n")
+              )
+              .setFooter({
+                text:
+                  "Sistema de Soporte • Valoraciones",
+              })
+              .setTimestamp();
+
+          const row =
+            new ActionRowBuilder().addComponents(
+              ...[1, 2, 3, 4, 5].map(
+                number =>
+                  new ButtonBuilder()
+                    .setCustomId(
+                      `rating_${interaction.channel.id}_${number}`
+                    )
+                    .setLabel(
+                      `${number}`
+                    )
+                    .setEmoji(
+                      "⭐"
+                    )
+                    .setStyle(
+                      number === 5
+                        ? ButtonStyle.Success
+                        : ButtonStyle.Primary
+                    )
+              )
+            );
+
+          await interaction.reply({
+            embeds: [
+              new EmbedBuilder()
+                .setColor(
+                  0x5865f2
+                )
+                .setTitle(
+                  "🔒 Cierre iniciado"
+                )
+                .setDescription(
+                  "El usuario debe valorar la atención antes de continuar."
+                )
+                .setTimestamp(),
+            ],
+          });
+
+          return interaction.channel.send(
+            {
+              content:
+                `<@${ticket.ownerId}>`,
+              embeds: [
+                ratingEmbed,
+              ],
+              components: [
+                row,
+              ],
+            }
+          );
+        }
+
+        // --------------------------------------------
+        // MOTIVO
+        // --------------------------------------------
+
+        if (
+          ticket.status ===
+          "rating"
+        ) {
+          return interaction.reply({
+            embeds: [
+              new EmbedBuilder()
+                .setColor(
+                  0xfee75c
+                )
+                .setTitle(
+                  "⭐ Valorar"
+                )
+                .setDescription(
+                  `<@${ticket.ownerId}> todavía debe valorar la atención.`
+                )
+                .setTimestamp(),
+            ],
+            ephemeral: true,
+          });
+        }
+
+        if (
+          ticket.status ===
+          "reason"
+        ) {
+          const modal =
+            new ModalBuilder()
+              .setCustomId(
+                `close_reason_${interaction.channel.id}`
+              )
+              .setTitle(
+                "Motivo de cierre"
+              );
+
+          const input =
+            new TextInputBuilder()
+              .setCustomId(
+                "close_reason"
+              )
+              .setLabel(
+                "Motivo de cierre"
+              )
+              .setPlaceholder(
+                "Escribe por qué se está cerrando el ticket..."
+              )
+              .setStyle(
+                TextInputStyle.Paragraph
+              )
+              .setRequired(true)
+              .setMaxLength(500);
+
+          modal.addComponents(
+            new ActionRowBuilder().addComponents(
+              input
+            )
+          );
+
+          return interaction.showModal(
+            modal
+          );
+        }
+
+        // --------------------------------------------
+        // CERRAR
+        // --------------------------------------------
+
+        if (
+          ticket.status ===
+          "confirm"
+        ) {
+          ticket.status =
+            "closing";
+
+          saveDB();
+
+          await interaction.reply({
+            embeds: [
+              new EmbedBuilder()
+                .setColor(
+                  0xed4245
+                )
+                .setTitle(
+                  "🔒 Cerrar ticket"
+                )
+                .setDescription(
+                  [
+                    "La solicitud ha sido finalizada correctamente.",
+                    "",
+                    `👤 **Usuario:** <@${ticket.ownerId}>`,
+                    `🛡️ **Atendido por:** <@${ticket.claimedBy}>`,
+                    `⭐ **Valoración:** ${ticket.rating}/5`,
+                    "",
+                    "📝 **Motivo de cierre**",
+                    ticket.closeReason ||
+                      "Sin especificar.",
+                    "",
+                    "⏳ Este ticket será eliminado en **5 segundos**.",
+                    "",
+                    "La transcripción se guardará antes de eliminar el canal.",
+                  ].join("\n")
+                )
+                .setTimestamp(),
+            ],
+          });
+
+          const transcript =
+            await createTranscript(
+              interaction.channel,
+              ticket
+            );
+
+          const attachment =
+            new AttachmentBuilder(
+              transcript,
+              {
+                name:
+                  `transcript-${interaction.channel.name}.txt`,
+              }
+            );
+
+          const config =
+            getGuildConfig(
+              interaction.guild.id
+            );
+
+          // LOG CIERRE
+          if (
+            config.transactionLogs
+          ) {
+            const log =
+              interaction.guild.channels.cache.get(
+                config.transactionLogs
+              );
+
+            if (log) {
+              await log.send({
+                embeds: [
+                  new EmbedBuilder()
+                    .setColor(
+                      0xed4245
+                    )
+                    .setTitle(
+                      "📜 Ticket cerrado"
+                    )
+                    .addFields(
+                      {
+                        name:
+                          "👤 Usuario",
+                        value:
+                          `<@${ticket.ownerId}>`,
+                        inline: true,
+                      },
+                      {
+                        name:
+                          "🛡️ Staff",
+                        value:
+                          `<@${ticket.claimedBy}>`,
+                        inline: true,
+                      },
+                      {
+                        name:
+                          "⭐ Valoración",
+                        value:
+                          `${ticket.rating}/5`,
+                        inline: true,
+                      },
+                      {
+                        name:
+                          "📝 Motivo",
+                        value:
+                          ticket.closeReason ||
+                          "Sin especificar.",
+                      }
+                    )
+                    .setTimestamp(),
+                ],
+                files: [
+                  attachment,
+                ],
+              }).catch(() => {});
+            }
+          }
+
+          // MD
+          const owner =
+            await interaction.guild.members
+              .fetch(
+                ticket.ownerId
+              )
+              .catch(
+                () => null
+              );
+
+          if (owner) {
+            await owner
+              .send({
+                embeds: [
+                  new EmbedBuilder()
+                    .setColor(
+                      0x5865f2
+                    )
+                    .setTitle(
+                      "🔒 Ticket cerrado"
+                    )
+                    .setDescription(
+                      [
+                        `Tu solicitud en **${interaction.guild.name}** ha sido cerrada.`,
+                        "",
+                        `🛡️ **Atendido por:** <@${ticket.claimedBy}>`,
+                        `⭐ **Valoración:** ${ticket.rating}/5`,
+                        "",
+                        "📝 **Motivo**",
+                        ticket.closeReason ||
+                          "Sin especificar.",
+                        "",
+                        "Gracias por utilizar nuestro sistema de soporte.",
+                      ].join("\n")
+                    )
+                    .setTimestamp(),
+                ],
+              })
+              .catch(() => {});
+          }
+
+          config.stats.closed++;
+
+          const stats =
+            staffStats(
+              interaction.guild.id,
+              ticket.claimedBy
+            );
+
+          stats.closed++;
+
+          saveDB();
+
+          const channel =
+            interaction.channel;
+
+          setTimeout(
+            async () => {
+              delete db.tickets[
+                channel.id
+              ];
+
+              saveDB();
+
+              await channel
+                .delete(
+                  "Ticket cerrado"
+                )
+                .catch(
+                  () => {}
+                );
+            },
+            5000
+          );
+
+          return;
+        }
+      }
+
+      // ================================================
+      // VALORACIÓN
+      // ================================================
+
+      if (
+        interaction.isButton() &&
+        interaction.customId.startsWith(
+          "rating_"
+        )
+      ) {
+        const parts =
+          interaction.customId.split(
+            "_"
+          );
+
+        const channelId =
+          parts[1];
+
+        const stars =
+          Number(parts[2]);
+
+        const ticket =
+          getTicket(channelId);
+
+        if (
+          !ticket ||
+          ticket.status !==
+            "rating"
+        ) {
+          return interaction.reply({
+            content:
+              "❌ Esta valoración ya no está disponible.",
+            ephemeral: true,
+          });
+        }
+
+        if (
+          interaction.user.id !==
+          ticket.ownerId
+        ) {
+          return interaction.reply({
+            content:
+              "❌ Solo el propietario puede valorar.",
+            ephemeral: true,
+          });
+        }
+
+        const modal =
+          new ModalBuilder()
+            .setCustomId(
+              `rating_modal_${channelId}_${stars}`
+            )
+            .setTitle(
+              `${stars}/5 estrellas`
+            );
+
+        const comment =
+          new TextInputBuilder()
+            .setCustomId(
+              "comment"
+            )
+            .setLabel(
+              "Comentario opcional"
+            )
+            .setPlaceholder(
+              "Cuéntanos cómo fue tu experiencia..."
+            )
+            .setStyle(
+              TextInputStyle.Paragraph
+            )
+            .setRequired(false)
+            .setMaxLength(500);
+
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(
+            comment
+          )
+        );
+
+        return interaction.showModal(
+          modal
+        );
+      }
+
+      // ================================================
+      // GUARDAR VALORACIÓN
+      // ================================================
+
+      if (
+        interaction.isModalSubmit() &&
+        interaction.customId.startsWith(
+          "rating_modal_"
+        )
+      ) {
+        const parts =
+          interaction.customId.split(
+            "_"
+          );
+
+        const channelId =
+          parts[2];
+
+        const stars =
+          Number(parts[3]);
+
+        const ticket =
+          getTicket(channelId);
+
+        if (
+          !ticket ||
+          ticket.status !==
+            "rating"
+        ) {
+          return interaction.reply({
+            content:
+              "❌ Esta valoración ya no está disponible.",
+            ephemeral: true,
+          });
+        }
+
+        if (
+          interaction.user.id !==
+          ticket.ownerId
+        ) {
+          return interaction.reply({
+            content:
+              "❌ No puedes valorar este ticket.",
+            ephemeral: true,
+          });
+        }
+
+        const comment =
+          interaction.fields
+            .getTextInputValue(
+              "comment"
+            )
+            .trim() ||
+          "Sin comentario.";
+
+        ticket.rating =
+          stars;
+
+        ticket.ratingComment =
+          comment;
+
+        ticket.status =
+          "reason";
+
+        const config =
+          getGuildConfig(
+            interaction.guild.id
+          );
+
+        config.stats.ratings.push(
+          stars
+        );
+
+        const stats =
+          staffStats(
+            interaction.guild.id,
+            ticket.claimedBy
+          );
+
+        stats.ratings.push(
+          stars
+        );
+
         saveDB();
 
-        const ratingEmbed = new EmbedBuilder()
-          .setColor(0xfee75c)
-          .setAuthor({
-            name: "Experiencia de Soporte",
-            iconURL: interaction.guild.iconURL() || undefined,
-          })
-          .setTitle("⭐ Valora la atención recibida")
-          .setDescription(
-            [
-              `<@${ticket.ownerId}>, la atención de tu solicitud está llegando a su etapa final.`,
-              "",
-              `Has sido atendido por <@${ticket.claimedBy}>.`,
-              "",
-              "━━━━━━━━━━━━━━━━━━━━",
-              "",
-              "### ¿Cómo valorarías la atención?",
-              "Selecciona una puntuación entre **1 y 5 estrellas**.",
-              "",
-              "Tu opinión se utilizará para conocer la calidad del servicio y ayudar al equipo a mejorar.",
-              "",
-              "━━━━━━━━━━━━━━━━━━━━",
-              "",
-              "🔒 **El ticket todavía no será eliminado.**",
-              "Después de tu valoración, el responsable continuará con el proceso de cierre.",
-            ].join("\n")
-          )
-          .setFooter({
-            text: "Centro de Soporte • Tu opinión importa",
-          })
-          .setTimestamp();
+        // LOG VALORACIÓN
+        if (
+          config.ratingLogs
+        ) {
+          const log =
+            interaction.guild.channels.cache.get(
+              config.ratingLogs
+            );
 
-        const row = new ActionRowBuilder().addComponents(
-          new ButtonBuilder()
-            .setCustomId(`rating_${interaction.channel.id}_1`)
-            .setLabel("1")
-            .setEmoji("⭐")
-            .setStyle(ButtonStyle.Secondary),
-
-          new ButtonBuilder()
-            .setCustomId(`rating_${interaction.channel.id}_2`)
-            .setLabel("2")
-            .setEmoji("⭐")
-            .setStyle(ButtonStyle.Secondary),
-
-          new ButtonBuilder()
-            .setCustomId(`rating_${interaction.channel.id}_3`)
-            .setLabel("3")
-            .setEmoji("⭐")
-            .setStyle(ButtonStyle.Secondary),
-
-          new ButtonBuilder()
-            .setCustomId(`rating_${interaction.channel.id}_4`)
-            .setLabel("4")
-            .setEmoji("⭐")
-            .setStyle(ButtonStyle.Primary),
-
-          new ButtonBuilder()
-            .setCustomId(`rating_${interaction.channel.id}_5`)
-            .setLabel("5")
-            .setEmoji("⭐")
-            .setStyle(ButtonStyle.Success)
-        );
+          if (log) {
+            await log.send({
+              embeds: [
+                new EmbedBuilder()
+                  .setColor(
+                    0xfee75c
+                  )
+                  .setTitle(
+                    "⭐ Nueva valoración"
+                  )
+                  .setDescription(
+                    [
+                      `${"⭐".repeat(
+                        stars
+                      )}${"☆".repeat(
+                        5 - stars
+                      )}`,
+                      "",
+                      `**${stars}/5 estrellas**`,
+                    ].join("\n")
+                  )
+                  .addFields(
+                    {
+                      name:
+                        "👤 Usuario",
+                      value:
+                        `<@${ticket.ownerId}>`,
+                      inline: true,
+                    },
+                    {
+                      name:
+                        "🛡️ Staff",
+                      value:
+                        `<@${ticket.claimedBy}>`,
+                      inline: true,
+                    },
+                    {
+                      name:
+                        "💬 Comentario",
+                      value:
+                        comment,
+                    }
+                  )
+                  .setTimestamp(),
+              ],
+            }).catch(() => {});
+          }
+        }
 
         await interaction.reply({
           embeds: [
             new EmbedBuilder()
-              .setColor(0x5865f2)
-              .setTitle("🔒 Proceso de cierre iniciado")
+              .setColor(
+                0x57f287
+              )
+              .setTitle(
+                "⭐ Valoración registrada"
+              )
               .setDescription(
                 [
-                  `${interaction.user} ha iniciado el proceso de finalización.`,
+                  `Has dado **${stars}/5 estrellas**.`,
                   "",
-                  "### Paso 1 de 3",
-                  "⭐ **Esperando valoración del usuario**",
+                  "Gracias por compartir tu experiencia.",
                   "",
-                  "Cuando el usuario termine de valorar, el responsable deberá pulsar nuevamente **Cerrar ticket**.",
+                  "La valoración ha sido registrada correctamente.",
                 ].join("\n")
               )
               .setTimestamp(),
@@ -1873,552 +3033,186 @@ client.on("interactionCreate", async interaction => {
         });
 
         return interaction.channel.send({
-          content: `<@${ticket.ownerId}>`,
-          embeds: [ratingEmbed],
-          components: [row],
-        });
-      }
-
-      // Todavía no valoró
-      if (ticket.status === "rating") {
-        return interaction.reply({
+          content:
+            `<@${ticket.claimedBy}>`,
           embeds: [
             new EmbedBuilder()
-              .setColor(0xfee75c)
-              .setTitle("⭐ Valoración pendiente")
+              .setColor(
+                0x5865f2
+              )
+              .setTitle(
+                "📝 Motivo de cierre"
+              )
               .setDescription(
                 [
-                  "Todavía no se puede continuar con el cierre.",
+                  "La valoración ya fue registrada.",
                   "",
-                  `<@${ticket.ownerId}> debe completar primero la valoración mostrada en este ticket.`,
+                  `El responsable <@${ticket.claimedBy}> debe pulsar nuevamente **Cerrar ticket**.`,
                   "",
-                  "Una vez enviada, podrás pulsar nuevamente **Cerrar ticket**.",
-                ].join("\n")
-              ),
-          ],
-          ephemeral: true,
-        });
-      }
-
-      // ================================================
-      // SEGUNDO CLIC → MOTIVO
-      // ================================================
-
-      if (ticket.status === "reason") {
-        const modal = new ModalBuilder()
-          .setCustomId(`close_reason_${interaction.channel.id}`)
-          .setTitle("Finalizar atención");
-
-        const input = new TextInputBuilder()
-          .setCustomId("reason")
-          .setLabel("Motivo del cierre")
-          .setPlaceholder(
-            "Ejemplo: La solicitud fue resuelta correctamente."
-          )
-          .setStyle(TextInputStyle.Paragraph)
-          .setRequired(true)
-          .setMinLength(3)
-          .setMaxLength(500);
-
-        modal.addComponents(
-          new ActionRowBuilder().addComponents(input)
-        );
-
-        return interaction.showModal(modal);
-      }
-
-      // ================================================
-      // TERCER CLIC → ELIMINAR
-      // ================================================
-
-      if (ticket.status === "confirm") {
-        ticket.status = "closing";
-        saveDB();
-
-        await interaction.reply({
-          embeds: [
-            new EmbedBuilder()
-              .setColor(0xed4245)
-              .setTitle("🔒 Ticket finalizado")
-              .setDescription(
-                [
-                  "El proceso de atención ha finalizado correctamente.",
-                  "",
-                  `👤 **Usuario:** <@${ticket.ownerId}>`,
-                  `🛡️ **Atendido por:** <@${ticket.claimedBy}>`,
-                  `⭐ **Valoración:** ${"⭐".repeat(
-                    ticket.rating || 0
-                  )} ${ticket.rating || 0}/5`,
-                  "",
-                  "### 📋 Motivo del cierre",
-                  ticket.closeReason || "Sin especificar.",
-                  "",
-                  "━━━━━━━━━━━━━━━━━━━━",
-                  "",
-                  "⏳ **Este ticket será eliminado en 5 segundos.**",
-                  "La transcripción será guardada antes de eliminar el canal.",
+                  "Ahí podrá escribir el motivo por el que se finaliza la solicitud.",
                 ].join("\n")
               )
-              .setFooter({
-                text: "Centro de Soporte • Solicitud finalizada",
-              })
               .setTimestamp(),
           ],
         });
+      }
 
-        // Transcript
-        const transcriptBuffer =
-          await createTranscript(interaction.channel, ticket);
+      // ================================================
+      // MOTIVO DE CIERRE
+      // ================================================
 
-        const transcript = new AttachmentBuilder(
-          transcriptBuffer,
-          {
-            name: `transcript-${interaction.channel.name}.txt`,
-          }
-        );
+      if (
+        interaction.isModalSubmit() &&
+        interaction.customId.startsWith(
+          "close_reason_"
+        )
+      ) {
+        const channelId =
+          interaction.customId.replace(
+            "close_reason_",
+            ""
+          );
 
-        const config = getGuildConfig(interaction.guild.id);
+        const ticket =
+          getTicket(channelId);
 
-        // Logs
-        if (config.transactionLogs) {
-          const logChannel =
-            interaction.guild.channels.cache.get(
-              config.transactionLogs
-            );
-
-          if (logChannel) {
-            const info = categoryInfo(ticket.category);
-
-            await logChannel
-              .send({
-                embeds: [
-                  new EmbedBuilder()
-                    .setColor(0xed4245)
-                    .setTitle("📜 Ticket Finalizado")
-                    .setDescription(
-                      "Una solicitud de soporte ha sido cerrada correctamente."
-                    )
-                    .addFields(
-                      {
-                        name: "👤 Usuario",
-                        value: `<@${ticket.ownerId}>`,
-                        inline: true,
-                      },
-                      {
-                        name: "🛡️ Staff",
-                        value: `<@${ticket.claimedBy}>`,
-                        inline: true,
-                      },
-                      {
-                        name: "📂 Categoría",
-                        value: `${info.emoji} ${info.name}`,
-                        inline: true,
-                      },
-                      {
-                        name: "⭐ Valoración",
-                        value: `${ticket.rating}/5`,
-                        inline: true,
-                      },
-                      {
-                        name: "📋 Motivo",
-                        value: ticket.closeReason,
-                      }
-                    )
-                    .setFooter({
-                      text:
-                        "📎 Transcripción adjunta al registro",
-                    })
-                    .setTimestamp(),
-                ],
-                files: [transcript],
-              })
-              .catch(console.error);
-          }
+        if (
+          !ticket ||
+          ticket.status !==
+            "reason"
+        ) {
+          return interaction.reply({
+            content:
+              "❌ Este ticket no está esperando un motivo.",
+            ephemeral: true,
+          });
         }
 
-        // MD
-        const owner =
-          await interaction.guild.members
-            .fetch(ticket.ownerId)
-            .catch(() => null);
-
-        if (owner) {
-          const info = categoryInfo(ticket.category);
-
-          await owner
-            .send({
-              embeds: [
-                new EmbedBuilder()
-                  .setColor(0x5865f2)
-                  .setTitle("🔒 Solicitud finalizada")
-                  .setDescription(
-                    [
-                      `Tu solicitud de soporte en **${interaction.guild.name}** ha sido finalizada.`,
-                      "",
-                      `📂 **Categoría:** ${info.emoji} ${info.name}`,
-                      `🛡️ **Atendido por:** <@${ticket.claimedBy}>`,
-                      `⭐ **Tu valoración:** ${ticket.rating}/5`,
-                      "",
-                      "### 📋 Motivo del cierre",
-                      ticket.closeReason,
-                      "",
-                      "Gracias por utilizar nuestro sistema de soporte.",
-                      "Si necesitas ayuda nuevamente, puedes crear una nueva solicitud.",
-                    ].join("\n")
-                  )
-                  .setFooter({
-                    text: `${interaction.guild.name} • Centro de Soporte`,
-                    iconURL:
-                      interaction.guild.iconURL() || undefined,
-                  })
-                  .setTimestamp(),
-              ],
-            })
-            .catch(() => {});
+        if (
+          ticket.claimedBy !==
+            interaction.user.id &&
+          !isAdmin(interaction)
+        ) {
+          return interaction.reply({
+            content:
+              "❌ Solo el responsable puede realizar esta acción.",
+            ephemeral: true,
+          });
         }
 
-        config.stats.closed++;
+        const reason =
+          interaction.fields.getTextInputValue(
+            "close_reason"
+          );
 
-        const staffStats = ensureStaffStats(
-          interaction.guild.id,
-          ticket.claimedBy
-        );
+        ticket.closeReason =
+          reason;
 
-        staffStats.closed++;
+        ticket.status =
+          "confirm";
 
         saveDB();
 
-        const channel = interaction.channel;
-        const channelId = channel.id;
-
-        setTimeout(async () => {
-          delete db.tickets[channelId];
-          saveDB();
-
-          await channel
-            .delete("Ticket finalizado")
-            .catch(() => {});
-        }, 5000);
-
-        return;
-      }
-    }
-
-    // ==================================================
-    // BOTONES DE VALORACIÓN
-    // ==================================================
-
-    if (
-      interaction.isButton() &&
-      interaction.customId.startsWith("rating_")
-    ) {
-      const parts = interaction.customId.split("_");
-
-      const channelId = parts[1];
-      const stars = Number(parts[2]);
-
-      const ticket = getTicket(channelId);
-
-      if (!ticket || ticket.status !== "rating") {
         return interaction.reply({
-          content:
-            "❌ Esta solicitud de valoración ya no está disponible.",
-          ephemeral: true,
+          embeds: [
+            new EmbedBuilder()
+              .setColor(
+                0xfee75c
+              )
+              .setTitle(
+                "🔒 Cerrar"
+              )
+              .setDescription(
+                [
+                  "El motivo de cierre ha sido registrado.",
+                  "",
+                  "📝 **Motivo**",
+                  reason,
+                  "",
+                  "Cuando estés listo, pulsa nuevamente **Cerrar ticket** para finalizarlo.",
+                ].join("\n")
+              )
+              .setTimestamp(),
+          ],
         });
       }
-
-      if (interaction.user.id !== ticket.ownerId) {
-        return interaction.reply({
-          content:
-            "❌ Solo el propietario del ticket puede enviar esta valoración.",
-          ephemeral: true,
-        });
-      }
-
-      const modal = new ModalBuilder()
-        .setCustomId(`rating_modal_${channelId}_${stars}`)
-        .setTitle(`${stars}/5 estrellas`);
-
-      const comment = new TextInputBuilder()
-        .setCustomId("comment")
-        .setLabel("Cuéntanos sobre tu experiencia")
-        .setPlaceholder(
-          "¿Qué te pareció la atención recibida?"
-        )
-        .setStyle(TextInputStyle.Paragraph)
-        .setRequired(false)
-        .setMaxLength(500);
-
-      modal.addComponents(
-        new ActionRowBuilder().addComponents(comment)
+    } catch (error) {
+      console.error(
+        "❌ Error:",
+        error
       );
 
-      return interaction.showModal(modal);
-    }
-
-    // ==================================================
-    // GUARDAR VALORACIÓN
-    // ==================================================
-
-    if (
-      interaction.isModalSubmit() &&
-      interaction.customId.startsWith("rating_modal_")
-    ) {
-      const parts = interaction.customId.split("_");
-
-      const channelId = parts[2];
-      const stars = Number(parts[3]);
-
-      const ticket = getTicket(channelId);
-
-      if (!ticket || ticket.status !== "rating") {
-        return interaction.reply({
-          content: "❌ Esta valoración ya no está disponible.",
-          ephemeral: true,
-        });
-      }
-
-      if (interaction.user.id !== ticket.ownerId) {
-        return interaction.reply({
-          content: "❌ Esta valoración no te pertenece.",
-          ephemeral: true,
-        });
-      }
-
-      const comment =
-        interaction.fields
-          .getTextInputValue("comment")
-          .trim() || "Sin comentario.";
-
-      ticket.rating = stars;
-      ticket.ratingComment = comment;
-
-      // Ahora el segundo clic en cerrar pedirá el motivo.
-      ticket.status = "reason";
-
-      const config = getGuildConfig(interaction.guild.id);
-
-      config.stats.ratings.push(stars);
-
-      const staffStats = ensureStaffStats(
-        interaction.guild.id,
-        ticket.claimedBy
-      );
-
-      staffStats.ratings.push(stars);
-
-      saveDB();
-
-      // Logs valoración
-      if (config.ratingLogs) {
-        const logChannel =
-          interaction.guild.channels.cache.get(
-            config.ratingLogs
-          );
-
-        if (logChannel) {
-          await logChannel
-            .send({
-              embeds: [
-                new EmbedBuilder()
-                  .setColor(0xfee75c)
-                  .setTitle("⭐ Nueva valoración de soporte")
-                  .setDescription(
-                    [
-                      `### ${"⭐".repeat(stars)}${"☆".repeat(
-                        5 - stars
-                      )}`,
-                      `**${stars}/5 estrellas**`,
-                      "",
-                      "Una nueva valoración ha sido registrada.",
-                    ].join("\n")
-                  )
-                  .addFields(
-                    {
-                      name: "👤 Usuario",
-                      value: `<@${ticket.ownerId}>`,
-                      inline: true,
-                    },
-                    {
-                      name: "🛡️ Staff",
-                      value: `<@${ticket.claimedBy}>`,
-                      inline: true,
-                    },
-                    {
-                      name: "💬 Comentario",
-                      value: comment,
-                    }
-                  )
-                  .setFooter({
-                    text: `${interaction.guild.name} • Valoraciones`,
-                  })
-                  .setTimestamp(),
-              ],
-            })
-            .catch(() => {});
+      try {
+        if (
+          !interaction.replied &&
+          !interaction.deferred
+        ) {
+          await interaction.reply({
+            content:
+              "❌ Ocurrió un error procesando esta acción.",
+            ephemeral: true,
+          });
         }
-      }
-
-      await interaction.reply({
-        embeds: [
-          new EmbedBuilder()
-            .setColor(0x57f287)
-            .setTitle("⭐ ¡Gracias por tu valoración!")
-            .setDescription(
-              [
-                `### ${"⭐".repeat(stars)}${"☆".repeat(
-                  5 - stars
-                )}`,
-                `Has valorado la atención con **${stars}/5 estrellas**.`,
-                "",
-                "Tu opinión ha sido registrada correctamente.",
-                "",
-                `🛡️ **Atendido por:** <@${ticket.claimedBy}>`,
-                "",
-                "Gracias por dedicar unos segundos a compartir tu experiencia.",
-              ].join("\n")
-            )
-            .setFooter({
-              text: "Centro de Soporte • Valoración registrada",
-            })
-            .setTimestamp(),
-        ],
-      });
-
-      return interaction.channel.send({
-        content: `<@${ticket.claimedBy}>`,
-        embeds: [
-          new EmbedBuilder()
-            .setColor(0x5865f2)
-            .setTitle("🔒 Paso 1 completado")
-            .setDescription(
-              [
-                "La valoración del usuario ha sido registrada.",
-                "",
-                "### Paso 2 de 3",
-                "📝 **Registrar motivo del cierre**",
-                "",
-                "El responsable del ticket debe pulsar nuevamente el botón **Cerrar ticket** y especificar el motivo por el que se finaliza la solicitud.",
-              ].join("\n")
-            )
-            .setTimestamp(),
-        ],
-      });
+      } catch {}
     }
-
-    // ==================================================
-    // MODAL MOTIVO DE CIERRE
-    // ==================================================
-
-    if (
-      interaction.isModalSubmit() &&
-      interaction.customId.startsWith("close_reason_")
-    ) {
-      const channelId =
-        interaction.customId.replace("close_reason_", "");
-
-      const ticket = getTicket(channelId);
-
-      if (!ticket || ticket.status !== "reason") {
-        return interaction.reply({
-          content:
-            "❌ Este ticket no está esperando un motivo de cierre.",
-          ephemeral: true,
-        });
-      }
-
-      if (
-        ticket.claimedBy !== interaction.user.id &&
-        !isRealAdmin(interaction)
-      ) {
-        return interaction.reply({
-          content:
-            "❌ Solo el responsable del ticket puede completar este paso.",
-          ephemeral: true,
-        });
-      }
-
-      const reason =
-        interaction.fields.getTextInputValue("reason");
-
-      ticket.closeReason = reason;
-      ticket.status = "confirm";
-
-      saveDB();
-
-      return interaction.reply({
-        embeds: [
-          new EmbedBuilder()
-            .setColor(0xfee75c)
-            .setTitle("📝 Motivo de cierre registrado")
-            .setDescription(
-              [
-                "El motivo de finalización ha sido guardado correctamente.",
-                "",
-                "### 📋 Motivo",
-                reason,
-                "",
-                "━━━━━━━━━━━━━━━━━━━━",
-                "",
-                "### Paso 3 de 3",
-                "🔒 **Confirmar cierre definitivo**",
-                "",
-                "Pulsa nuevamente **Cerrar ticket**.",
-                "",
-                "Al hacerlo:",
-                "• Se generará la transcripción.",
-                "• Se enviará el registro a los logs.",
-                "• El usuario recibirá el motivo por MD.",
-                "• El canal será eliminado después de **5 segundos**.",
-              ].join("\n")
-            )
-            .setFooter({
-              text: "Centro de Soporte • Confirmación pendiente",
-            })
-            .setTimestamp(),
-        ],
-      });
-    }
-  } catch (error) {
-    console.error("❌ Error en interactionCreate:", error);
-
-    await safeReply(interaction, {
-      content:
-        "❌ Ocurrió un error mientras procesaba esta acción.",
-      ephemeral: true,
-    });
   }
-});
+);
 
 // ======================================================
-// SERVIDOR HTTP
+// HTTP PARA HOSTING
 // ======================================================
 
-const PORT = process.env.PORT || 3000;
+const PORT =
+  process.env.PORT || 3000;
 
 http
-  .createServer((req, res) => {
-    res.writeHead(200, {
-      "Content-Type": "text/plain; charset=utf-8",
-    });
+  .createServer(
+    (req, res) => {
+      res.writeHead(
+        200,
+        {
+          "Content-Type":
+            "text/plain; charset=utf-8",
+        }
+      );
 
-    res.end("Sistema de tickets online.");
-  })
-  .listen(PORT, () => {
-    console.log(`🌐 Servidor HTTP activo en puerto ${PORT}`);
-  });
+      res.end(
+        "Sistema de tickets online."
+      );
+    }
+  )
+  .listen(
+    PORT,
+    () => {
+      console.log(
+        `🌐 HTTP activo en puerto ${PORT}`
+      );
+    }
+  );
 
 // ======================================================
 // ERRORES
 // ======================================================
 
-process.on("unhandledRejection", error => {
-  console.error("❌ Unhandled Rejection:", error);
-});
+process.on(
+  "unhandledRejection",
+  error => {
+    console.error(
+      "❌ Unhandled Rejection:",
+      error
+    );
+  }
+);
 
-process.on("uncaughtException", error => {
-  console.error("❌ Uncaught Exception:", error);
-});
+process.on(
+  "uncaughtException",
+  error => {
+    console.error(
+      "❌ Uncaught Exception:",
+      error
+    );
+  }
+);
 
 // ======================================================
 // LOGIN
